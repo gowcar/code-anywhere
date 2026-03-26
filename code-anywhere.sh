@@ -169,6 +169,16 @@ do_restart() {
     do_start
 }
 
+do_log() {
+    if [ ! -f "$LOG_FILE" ]; then
+        echo -e "${YELLOW}日志文件不存在: $LOG_FILE${NC}"
+        exit 1
+    fi
+    echo -e "${CYAN}$APP_NAME${NC} — tail -f $LOG_FILE  (Ctrl+C 退出)"
+    echo ""
+    tail -f "$LOG_FILE"
+}
+
 do_debug() {
     if _is_running; then
         local pid
@@ -193,6 +203,7 @@ case "${1:-}" in
     start)   do_start   ;;
     stop)    do_stop    ;;
     restart) do_restart ;;
+    log)     do_log     ;;
     debug)   do_debug   ;;
     *)
         echo -e "${BOLD}Code Anywhere${NC} — 服务管理"
@@ -200,6 +211,7 @@ case "${1:-}" in
         echo -e "  ${GREEN}./code-anywhere.sh start${NC}     后台启动"
         echo -e "  ${GREEN}./code-anywhere.sh stop${NC}      停止服务"
         echo -e "  ${GREEN}./code-anywhere.sh restart${NC}   重启服务"
+        echo -e "  ${GREEN}./code-anywhere.sh log${NC}       查看实时日志"
         echo -e "  ${GREEN}./code-anywhere.sh debug${NC}     前台调试模式"
         echo ""
         _status_line
