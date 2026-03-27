@@ -23,7 +23,7 @@ from src.config import BOT_TOKEN, ALLOWED_USERS, ALLOW_ALL
 from src.claude_runner import (
     active_sessions, get_or_create_session, send_message, kill_session,
 )
-from src.renderer import split_message, format_tool_use, wrap_collapsible
+from src.renderer import split_message, format_tool_use, send_ephemeral
 from src import state
 from src import projects
 
@@ -273,9 +273,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sid, info in terminal_sessions.items():
         if info.get("topic_id") == session_key and info.get("tmux_pane"):
             await _inject_tmux(info["tmux_pane"], text)
-            await message.reply_text(
-                wrap_collapsible(f"📤 发送到终端 <code>{html_lib.escape(info['tmux_pane'])}</code>"),
-                parse_mode="HTML",
+            await send_ephemeral(
+                context.bot, chat_id,
+                f"📤 发送到终端 <code>{html_lib.escape(info['tmux_pane'])}</code>",
+                message_thread_id=topic_id,
             )
             return
 
@@ -374,9 +375,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         streaming_text = ""
                     elif block_type == "tool_use":
                         desc = format_tool_use(block.get("name", "?"), block.get("input", {}))
-                        await message.reply_text(
-                            wrap_collapsible(f"[{turn_count}] {desc}"),
-                            parse_mode="HTML",
+                        await send_ephemeral(
+                            context.bot, chat_id,
+                            f"[{turn_count}] {desc}",
+                            message_thread_id=topic_id,
                         )
 
             elif event_type == "result":

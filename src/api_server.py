@@ -102,7 +102,7 @@ _watchers: dict[int, asyncio.Task] = {}
 async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import html as html_lib
-    from src.renderer import format_tool_use, split_message, wrap_collapsible
+    from src.renderer import format_tool_use, split_message, send_ephemeral
 
     seen_ids = set()
     last_pos = 0
@@ -196,10 +196,10 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                     break
                         if text.strip():
                             truncated = html_lib.escape(text[:500])
-                            await _bot.send_message(
-                                chat_id=chat_id, message_thread_id=topic_id,
-                                text=wrap_collapsible(f"👤 {truncated}"),
-                                parse_mode="HTML",
+                            await send_ephemeral(
+                                _bot, chat_id,
+                                f"👤 {truncated}",
+                                message_thread_id=topic_id,
                             )
 
                     elif event_type == "assistant":
@@ -223,10 +223,10 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                             )
                             elif block.get("type") == "tool_use":
                                 desc = format_tool_use(block.get("name", "?"), block.get("input", {}))
-                                await _bot.send_message(
-                                    chat_id=chat_id, message_thread_id=topic_id,
-                                    text=wrap_collapsible(desc),
-                                    parse_mode="HTML",
+                                await send_ephemeral(
+                                    _bot, chat_id,
+                                    desc,
+                                    message_thread_id=topic_id,
                                 )
                 except Exception as e:
                     log.error(f"[watcher] TG 发送失败: {e}", exc_info=True)
@@ -272,15 +272,14 @@ async def handle_notification(request: web.Request) -> web.Response:
 
     try:
         import html
-        from src.renderer import wrap_collapsible
+        from src.renderer import send_ephemeral
         text = html.escape(message[:4000])
         if title:
             text = f"<b>{html.escape(title)}</b>\n{text}"
-        await _bot.send_message(
-            chat_id=info["chat_id"],
+        await send_ephemeral(
+            _bot, info["chat_id"],
+            text,
             message_thread_id=info["topic_id"],
-            text=wrap_collapsible(text),
-            parse_mode="HTML",
         )
     except Exception as e:
         log.warning(f"[notification] TG 发送失败: {e}")

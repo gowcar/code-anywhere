@@ -194,12 +194,31 @@ def format_tool_use(tool_name: str, tool_input: dict) -> str:
         return f"{icon} {tool_name}: <code>{html.escape(summary)}</code>"
 
 
-def wrap_collapsible(text: str, title: str = "") -> str:
-    """将过程性消息包裹在可折叠引用块中
+async def send_ephemeral(bot, chat_id: int, text: str, ttl: float = 5.0,
+                         message_thread_id: int | None = None,
+                         parse_mode: str = "HTML"):
+    """发送过程性消息，ttl 秒后自动删除
 
-    TG 原生 expandable blockquote：默认折叠，点击展开。
-    title 显示在折叠状态下的首行。
+    用于工具调用通知、终端注入确认等非最终内容。
     """
-    if title:
-        return f'<blockquote expandable>{html.escape(title)}\n{text}</blockquote>'
-    return f'<blockquote expandable>{text}</blockquote>'
+    import asyncio
+    try:
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            message_thread_id=message_thread_id,
+            parse_mode=parse_mode,
+        )
+
+        async def _delete_later():
+            await asyncio.sleep(ttl)
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+        asyncio.create_task(_delete_later())
+        return msg
+    except Exception as e:
+        log.warning(f"[ephemeral] 发送失败: {e}")
+        return None
