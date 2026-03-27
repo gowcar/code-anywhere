@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────
 #  Code Anywhere — 服务管理
-#  Usage: ./code-anywhere.sh start|stop|restart|debug
+#  Usage: ./code-anywhere.sh start|stop|restart|status|log|debug
 # ──────────────────────────────────────────────
 set -e
 
@@ -179,6 +179,58 @@ do_log() {
     tail -f "$LOG_FILE"
 }
 
+do_status() {
+    _banner
+    echo -e "  ${BOLD}服务状态${NC}"
+    echo ""
+
+    # Bot 进程
+    if _is_running; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        local uptime_info
+        uptime_info=$(ps -o etime= -p "$pid" 2>/dev/null | xargs)
+        echo -e "  Bot:     ${GREEN}● 运行中${NC}  PID $pid  uptime $uptime_info"
+    else
+        echo -e "  Bot:     ${RED}● 未运行${NC}"
+    fi
+
+    # API Server 端口
+    local port
+    port=$(grep -E '^BOT_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- | xargs)
+    port=${port:-5000}
+    if lsof -i ":$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo -e "  API:     ${GREEN}● 监听中${NC}  http://127.0.0.1:$port"
+    else
+        echo -e "  API:     ${RED}● 未监听${NC}  端口 $port"
+    fi
+
+    # 日志文件
+    if [ -f "$LOG_FILE" ]; then
+        local log_size
+        log_size=$(du -h "$LOG_FILE" | cut -f1 | xargs)
+        local log_lines
+        log_lines=$(wc -l < "$LOG_FILE" | xargs)
+        echo -e "  日志:    ${CYAN}$log_size${NC}  ${log_lines} 行  $LOG_FILE"
+    else
+        echo -e "  日志:    ${YELLOW}无${NC}"
+    fi
+
+    # PID 文件
+    echo ""
+
+    # 最近日志（最后 5 行）
+    if [ -f "$LOG_FILE" ]; then
+        echo -e "  ${BOLD}最近日志${NC}"
+        echo ""
+        tail -5 "$LOG_FILE" | while IFS= read -r line; do
+            echo "  $line"
+        done
+    fi
+
+    echo ""
+}
+
 do_debug() {
     if _is_running; then
         local pid
@@ -203,6 +255,7 @@ case "${1:-}" in
     start)   do_start   ;;
     stop)    do_stop    ;;
     restart) do_restart ;;
+    status)  do_status  ;;
     log)     do_log     ;;
     debug)   do_debug   ;;
     *)
@@ -211,6 +264,7 @@ case "${1:-}" in
         echo -e "  ${GREEN}./code-anywhere.sh start${NC}     后台启动"
         echo -e "  ${GREEN}./code-anywhere.sh stop${NC}      停止服务"
         echo -e "  ${GREEN}./code-anywhere.sh restart${NC}   重启服务"
+        echo -e "  ${GREEN}./code-anywhere.sh status${NC}    查看服务状态"
         echo -e "  ${GREEN}./code-anywhere.sh log${NC}       查看实时日志"
         echo -e "  ${GREEN}./code-anywhere.sh debug${NC}     前台调试模式"
         echo ""
