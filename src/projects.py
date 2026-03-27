@@ -99,14 +99,6 @@ def discover() -> list[dict]:
         real_path = _reverse_path(d.name)
         if not Path(real_path).is_dir():
             continue
-        # 跳过 Bot 自身项目（避免自己给自己创建话题）
-        if Path(real_path).resolve() == PROJECT_ROOT.resolve():
-            # 清理残留的自身绑定
-            self_topic = get_topic(real_path)
-            if self_topic:
-                log.info(f"[discover] 清理 Bot 自身项目的残留绑定 (topic {self_topic})")
-                unbind(self_topic)
-            continue
         sessions = list(d.glob("*.jsonl"))
         if not sessions:
             continue

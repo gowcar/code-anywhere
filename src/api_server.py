@@ -52,9 +52,8 @@ async def handle_session_start(request: web.Request) -> web.Response:
 
     log.info(f"[session_start] session={session_id} cwd={cwd} source={source} tmux={tmux_pane}")
 
-    # 跳过 Bot 自身项目
-    if cwd == str(config.PROJECT_ROOT.resolve()):
-        return web.json_response({"ok": True})
+    # Bot spawn 的 Claude 已通过 CODE_ANYWHERE_SKIP 环境变量跳过 hook
+    # 这里只会收到终端会话的回调，所以不再排除自身项目
 
     if not _bot or not config.CHAT_ID:
         return web.json_response({"ok": True})
@@ -424,11 +423,6 @@ async def _recover_active_sessions():
         if len(parts) < 3:
             continue
         pane_id, cmd, cwd = parts
-
-        # 跳过 Bot 自身项目（避免循环依赖）
-        self_dir = str(config.PROJECT_ROOT.resolve())
-        if cwd == self_dir:
-            continue
 
         # 找对应的话题（只关心绑定了项目的 pane）
         topic_id = projects.get_topic(cwd)

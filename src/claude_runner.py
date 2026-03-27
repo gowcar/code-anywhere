@@ -48,6 +48,8 @@ async def spawn_claude(session: Session, resume_id: str | None = None) -> None:
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
+    env.pop("TMUX_PANE", None)              # 防止 hook 误认为终端会话
+    env["CODE_ANYWHERE_SKIP"] = "1"         # Bot 发起的 Claude 不触发 code-anywhere hook
 
     log.info(f"[spawn] key={session.key} cwd={session.cwd} resume={resume_id or 'new'}")
 
