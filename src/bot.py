@@ -273,10 +273,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sid, info in terminal_sessions.items():
         if info.get("topic_id") == session_key and info.get("tmux_pane"):
             await _inject_tmux(info["tmux_pane"], text)
-            await message.reply_text(
-                f"📤 发送到终端",
-                parse_mode="HTML",
-            )
             return
 
     typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id, topic_id))
