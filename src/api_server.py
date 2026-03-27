@@ -272,13 +272,14 @@ async def handle_notification(request: web.Request) -> web.Response:
 
     try:
         import html
+        from src.renderer import wrap_collapsible
         text = html.escape(message[:4000])
         if title:
             text = f"<b>{html.escape(title)}</b>\n{text}"
         await _bot.send_message(
             chat_id=info["chat_id"],
             message_thread_id=info["topic_id"],
-            text=text,
+            text=wrap_collapsible(text),
             parse_mode="HTML",
         )
     except Exception as e:
