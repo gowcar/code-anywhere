@@ -2,6 +2,7 @@
 
 Telegram 支持的 HTML 标签：
 <b>, <i>, <code>, <pre>, <a href>, <blockquote>, <s>, <u>
+<blockquote expandable> — 可折叠引用块
 """
 
 import html
@@ -15,16 +16,74 @@ TG_MAX_LEN = 4096
 
 
 def md_to_tg_html(text: str) -> str:
-    """将 Markdown 转为 Telegram 支持的 HTML 子集"""
-    # 先 escape HTML 特殊字符
-    text = html.escape(text)
+    """将 Markdown 转为 Telegram 支持的 HTML 子集
 
-    # 代码块 ```...``` → <pre>...</pre>
-    text = re.sub(
-        r'```(\w*)\n(.*?)```',
-        lambda m: f'<pre>{m.group(2)}</pre>',
-        text, flags=re.DOTALL
-    )
+    处理顺序：
+    1. 提取代码块/表格 → 占位符（保护内部不被转义）
+    2. HTML 转义剩余文本
+    3. 逐步转换 Markdown 语法 → HTML 标签
+    4. 还原占位符
+    """
+
+    # 先提取代码块，避免内部被转义/转换
+    code_blocks: list[str] = []
+
+    def _stash_code(m):
+        lang = m.group(1) or ""
+        code = m.group(2)
+        idx = len(code_blocks)
+        escaped = html.escape(code)
+        if lang:
+            code_blocks.append(f'<pre><code class="language-{lang}">{escaped}</code></pre>')
+        else:
+            code_blocks.append(f'<pre>{escaped}</pre>')
+        return f"\x00CODEBLOCK{idx}\x00"
+
+    text = re.sub(r'```(\w*)\n(.*?)```', _stash_code, text, flags=re.DOTALL)
+
+    # Markdown 表格 → <pre> 等宽格式（TG 不支持 <table>）
+    def _format_table(m):
+        lines = m.group(0).strip().split('\n')
+        rows = []
+        for line in lines:
+            if re.match(r'^\|[\s\-:|]+$', line.strip()):
+                continue
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            rows.append(cells)
+        if not rows:
+            return m.group(0)
+
+        def _display_width(s):
+            """中文字符算 2 宽度，英文算 1"""
+            w = 0
+            for c in s:
+                w += 2 if '\u4e00' <= c <= '\u9fff' or '\u3000' <= c <= '\u303f' else 1
+            return w
+
+        ncols = max(len(r) for r in rows)
+        col_widths = [0] * ncols
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < ncols:
+                    col_widths[i] = max(col_widths[i], _display_width(cell))
+        formatted = []
+        for ri, row in enumerate(rows):
+            parts = []
+            for i in range(ncols):
+                cell = row[i] if i < len(row) else ""
+                pad = col_widths[i] - _display_width(cell)
+                parts.append(cell + ' ' * pad)
+            formatted.append('  '.join(parts))
+            if ri == 0:
+                formatted.append('  '.join('─' * w for w in col_widths))
+        idx = len(code_blocks)
+        code_blocks.append(f'<pre>{html.escape(chr(10).join(formatted))}</pre>')
+        return f"\x00CODEBLOCK{idx}\x00"
+
+    text = re.sub(r'(?:^\|.+\|$\n?){2,}', _format_table, text, flags=re.MULTILINE)
+
+    # 转义剩余 HTML 特殊字符
+    text = html.escape(text)
 
     # 行内代码 `...` → <code>...</code>
     text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
@@ -32,8 +91,8 @@ def md_to_tg_html(text: str) -> str:
     # 粗体 **...** → <b>...</b>
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
 
-    # 斜体 *...* → <i>...</i>
-    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    # 斜体 *...* → <i>...</i>（避免匹配列表项 *）
+    text = re.sub(r'(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)', r'<i>\1</i>', text)
 
     # 删除线 ~~...~~ → <s>...</s>
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
@@ -41,30 +100,28 @@ def md_to_tg_html(text: str) -> str:
     # 链接 [text](url) → <a href="url">text</a>
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
 
-    # 标题 # → 粗体
-    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # 标题 # → 粗体 + 下划线
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b><u>\1</u></b>', text, flags=re.MULTILINE)
 
-    # 引用 > → blockquote
-    lines = text.split('\n')
-    result = []
-    in_quote = False
-    for line in lines:
-        if line.startswith('&gt; '):
-            if not in_quote:
-                result.append('<blockquote>')
-                in_quote = True
-            result.append(line[5:])
-        else:
-            if in_quote:
-                result.append('</blockquote>')
-                in_quote = False
-            result.append(line)
-    if in_quote:
-        result.append('</blockquote>')
-    text = '\n'.join(result)
+    # 引用 > → blockquote（html.escape 后 > 变成 &gt;）
+    def _blockquote(m):
+        lines = m.group(0).split('\n')
+        content = '\n'.join(re.sub(r'^&gt;\s?', '', line) for line in lines)
+        return f'<blockquote>{content}</blockquote>'
+    text = re.sub(r'^(?:&gt;.*\n?)+', _blockquote, text, flags=re.MULTILINE)
 
-    # 列表 - → •
-    text = re.sub(r'^- ', '• ', text, flags=re.MULTILINE)
+    # 无序列表 - / * → •
+    text = re.sub(r'^[\-\*]\s+', '• ', text, flags=re.MULTILINE)
+
+    # 有序列表保留数字
+    text = re.sub(r'^(\d+)\.\s+', r'\1. ', text, flags=re.MULTILINE)
+
+    # 分隔线 --- / *** → ——
+    text = re.sub(r'^[-\*]{3,}\s*$', '———————————', text, flags=re.MULTILINE)
+
+    # 还原代码块
+    for i, block in enumerate(code_blocks):
+        text = text.replace(f'\x00CODEBLOCK{i}\x00', block)
 
     return text.strip()
 
@@ -114,19 +171,35 @@ def format_tool_use(tool_name: str, tool_input: dict) -> str:
     icons = {
         "Bash": "⚡", "Read": "📖", "Edit": "✏️", "Write": "📝",
         "Glob": "🔍", "Grep": "🔎", "Task": "🧩", "Agent": "🤖",
+        "WebSearch": "🌐", "WebFetch": "🌐",
     }
     icon = icons.get(tool_name, "🔧")
 
-    if tool_name == "Bash":
+    name = tool_name.lower()
+    if name in ("bash", "shell"):
         cmd = tool_input.get("command", "")
         return f"{icon} <code>{html.escape(cmd[:150])}</code>"
-    elif tool_name in ("Read", "Edit", "Write"):
-        path = tool_input.get("file_path", "")
+    elif name in ("read", "edit", "write"):
+        path = tool_input.get("file_path", tool_input.get("filePath", ""))
         return f"{icon} <code>{html.escape(path)}</code>"
-    elif tool_name in ("Glob", "Grep"):
+    elif name in ("glob", "grep"):
         pattern = tool_input.get("pattern", "")
         return f"{icon} <code>{html.escape(pattern[:100])}</code>"
+    elif name in ("websearch", "webfetch"):
+        query = tool_input.get("query", tool_input.get("searchTerm", tool_input.get("url", "")))
+        return f"{icon} <code>{html.escape(query[:100])}</code>"
     else:
-        import json
-        summary = json.dumps(tool_input, ensure_ascii=False)[:80]
+        import json as _json
+        summary = _json.dumps(tool_input, ensure_ascii=False)[:80]
         return f"{icon} {tool_name}: <code>{html.escape(summary)}</code>"
+
+
+def wrap_collapsible(text: str, title: str = "") -> str:
+    """将过程性消息包裹在可折叠引用块中
+
+    TG 原生 expandable blockquote：默认折叠，点击展开。
+    title 显示在折叠状态下的首行。
+    """
+    if title:
+        return f'<blockquote expandable>{html.escape(title)}\n{text}</blockquote>'
+    return f'<blockquote expandable>{text}</blockquote>'

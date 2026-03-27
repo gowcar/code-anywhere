@@ -102,7 +102,7 @@ _watchers: dict[int, asyncio.Task] = {}
 async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import html as html_lib
-    from src.renderer import format_tool_use
+    from src.renderer import format_tool_use, split_message, wrap_collapsible
 
     seen_ids = set()
     last_pos = 0
@@ -184,10 +184,9 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
 
                 try:
                     if event_type == "user":
-                        # 用户在终端输入的内容
+                        # 用户在终端输入的内容 → 折叠显示
                         content = event.get("message", {}).get("content", "")
                         text = ""
-                        content_type = type(content).__name__
                         if isinstance(content, str):
                             text = content
                         elif isinstance(content, list):
@@ -195,16 +194,13 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 if c.get("type") == "text":
                                     text = c["text"]
                                     break
-                        log.info(f"[watcher] user content_type={content_type} text_len={len(text.strip())} text={text[:50]}")
                         if text.strip():
                             truncated = html_lib.escape(text[:500])
-                            log.info(f"[watcher] → TG user msg to topic={topic_id}")
                             await _bot.send_message(
                                 chat_id=chat_id, message_thread_id=topic_id,
-                                text=f"👤 {truncated}",
+                                text=wrap_collapsible(f"👤 {truncated}"),
                                 parse_mode="HTML",
                             )
-                            log.info(f"[watcher] → TG user msg sent")
 
                     elif event_type == "assistant":
                         content = event.get("message", {}).get("content", [])
@@ -212,20 +208,24 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             if block.get("type") == "text":
                                 text = block.get("text", "").strip()
                                 if text:
-                                    log.info(f"[watcher] → TG assistant msg to topic={topic_id} len={len(text)}")
-                                    for i in range(0, len(text), 4000):
-                                        chunk = html_lib.escape(text[i:i+4000])
-                                        await _bot.send_message(
-                                            chat_id=chat_id, message_thread_id=topic_id,
-                                            text=f"🤖 {chunk}",
-                                            parse_mode="HTML",
-                                        )
-                                    log.info(f"[watcher] → TG assistant msg sent")
+                                    chunks = split_message(text, render=True)
+                                    for rendered, raw in chunks:
+                                        try:
+                                            await _bot.send_message(
+                                                chat_id=chat_id, message_thread_id=topic_id,
+                                                text=f"🤖 {rendered}",
+                                                parse_mode="HTML",
+                                            )
+                                        except Exception:
+                                            await _bot.send_message(
+                                                chat_id=chat_id, message_thread_id=topic_id,
+                                                text=f"🤖 {raw}",
+                                            )
                             elif block.get("type") == "tool_use":
                                 desc = format_tool_use(block.get("name", "?"), block.get("input", {}))
                                 await _bot.send_message(
                                     chat_id=chat_id, message_thread_id=topic_id,
-                                    text=desc,
+                                    text=wrap_collapsible(desc),
                                     parse_mode="HTML",
                                 )
                 except Exception as e:
