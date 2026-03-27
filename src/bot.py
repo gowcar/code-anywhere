@@ -273,10 +273,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for sid, info in terminal_sessions.items():
         if info.get("topic_id") == session_key and info.get("tmux_pane"):
             await _inject_tmux(info["tmux_pane"], text)
-            await send_ephemeral(
-                context.bot, chat_id,
-                f"📤 发送到终端 <code>{html_lib.escape(info['tmux_pane'])}</code>",
-                message_thread_id=topic_id,
+            await message.reply_text(
+                f"📤 发送到终端",
+                parse_mode="HTML",
             )
             return
 
