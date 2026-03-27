@@ -195,12 +195,19 @@ do_status() {
         echo -e "  Bot:     ${RED}● 未运行${NC}"
     fi
 
-    # API Server 端口
+    # API Server — 通过 health 接口检测
     local port
     port=$(grep -E '^BOT_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- | xargs)
     port=${port:-5000}
-    if lsof -i ":$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    local health
+    health=$(curl -sf "http://127.0.0.1:$port/health" 2>/dev/null) || true
+    if [ -n "$health" ]; then
+        local t_sessions p_perms
+        t_sessions=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('terminal_sessions',0))" 2>/dev/null || echo "?")
+        p_perms=$(echo "$health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pending_permissions',0))" 2>/dev/null || echo "?")
         echo -e "  API:     ${GREEN}● 监听中${NC}  http://127.0.0.1:$port"
+        echo -e "  终端:    ${t_sessions} 个活跃会话"
+        echo -e "  审批:    ${p_perms} 个待处理"
     else
         echo -e "  API:     ${RED}● 未监听${NC}  端口 $port"
     fi
