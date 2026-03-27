@@ -13,6 +13,9 @@ __pycache__/
 logs/*.log
 logs/*.log.*
 
+# Attachments (TG file proxy)
+.attachments/
+
 # Runtime
 *.pid
 

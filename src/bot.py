@@ -4,7 +4,9 @@ import asyncio
 import html as html_lib
 import json
 import logging
+import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -226,6 +228,105 @@ async def _send_tg(message, text: str):
             await message.reply_text(raw)
 
 
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+# 文件类型分类
+_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
+_PDF_EXT = {".pdf"}
+_TEXT_EXT = {
+    ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp",
+    ".h", ".hpp", ".rb", ".php", ".sh", ".bash", ".fish", ".zsh",
+    ".sql", ".r", ".swift", ".kt", ".scala", ".lua", ".vim",
+    ".css", ".scss", ".less", ".svg", ".ini", ".cfg", ".conf", ".env",
+    ".gitignore", ".dockerignore", ".editorconfig",
+    ".log", ".diff", ".patch",
+}
+_OFFICE_EXT = {".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt", ".odt", ".ods", ".odp"}
+
+
+async def _download_attachment(message, context, cwd: str) -> tuple[str | None, str | None, str]:
+    """下载 TG 附件到项目 .attachments/ 目录
+
+    Returns: (local_path, file_ext, error_msg)
+    """
+    # 确定文件对象和文件名
+    file_obj = None
+    file_name = None
+
+    if message.photo:
+        # TG 图片：取最大尺寸
+        file_obj = message.photo[-1]
+        file_name = f"photo_{file_obj.file_unique_id}.jpg"
+    elif message.document:
+        doc = message.document
+        if doc.file_size and doc.file_size > MAX_FILE_SIZE:
+            return None, None, f"文件太大（{doc.file_size // 1024 // 1024}MB），限制 10MB"
+        file_obj = doc
+        file_name = doc.file_name or f"file_{doc.file_unique_id}"
+    elif message.video:
+        return None, None, "暂不支持视频文件"
+    elif message.audio or message.voice:
+        return None, None, "暂不支持音频文件"
+    elif message.sticker:
+        return None, None, ""  # 贴纸静默忽略
+
+    if not file_obj:
+        return None, None, ""
+
+    # 检查文件大小（photo 没有 file_size 属性，需要 get_file 后检查）
+    try:
+        tg_file = await file_obj.get_file()
+    except Exception as e:
+        return None, None, f"获取文件失败: {e}"
+
+    if tg_file.file_size and tg_file.file_size > MAX_FILE_SIZE:
+        return None, None, f"文件太大（{tg_file.file_size // 1024 // 1024}MB），限制 10MB"
+
+    # 构建本地路径
+    attachments_dir = Path(cwd) / ".attachments"
+    attachments_dir.mkdir(exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = file_name.replace("/", "_").replace(" ", "_")
+    local_name = f"{ts}_{safe_name}"
+    local_path = attachments_dir / local_name
+
+    try:
+        await tg_file.download_to_drive(str(local_path))
+    except Exception as e:
+        return None, None, f"下载文件失败: {e}"
+
+    ext = Path(file_name).suffix.lower()
+    rel_path = f".attachments/{local_name}"
+    log.info(f"[attachment] saved {rel_path} ({tg_file.file_size or '?'} bytes)")
+    return rel_path, ext, ""
+
+
+def _build_file_prompt(rel_path: str, ext: str, caption: str) -> str:
+    """根据文件类型构建发给 Claude CLI 的 prompt"""
+    if ext in _IMAGE_EXT:
+        desc = "一张图片"
+        action = "请查看并分析"
+    elif ext in _PDF_EXT:
+        desc = "一个 PDF 文件"
+        action = "请阅读"
+    elif ext in _TEXT_EXT:
+        desc = "一个文本文件"
+        action = "请查看"
+    elif ext in _OFFICE_EXT:
+        desc = "一个 Office 文档"
+        action = "请读取内容"
+    else:
+        desc = "一个文件"
+        action = "请尝试查看"
+
+    prompt = f"用户发送了{desc}（已保存到 {rel_path}），{action}。"
+    if caption:
+        prompt += f"\n用户说：{caption}"
+    return prompt
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         user = update.effective_user
@@ -235,13 +336,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = update.message
-    if not message or not message.text:
+    if not message:
         return
 
     topic_id = message.message_thread_id
     chat_id = message.chat_id
-    text = message.text
     is_private = message.chat.type == "private"
+    has_file = bool(message.photo or message.document or message.video
+                    or message.audio or message.voice or message.sticker)
+
+    if not message.text and not has_file:
+        return
+
+    text = message.text or message.caption or ""
 
     # 自动检测群组 CHAT_ID
     if not is_private and not config.CHAT_ID:
@@ -266,7 +373,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("此话题未绑定项目。请用 /projects 添加。")
         return
 
-    log.info(f"[msg] key={session_key} proj={Path(cwd).name} text={text[:60]}")
+    # 处理文件附件
+    if has_file:
+        rel_path, ext, err = await _download_attachment(message, context, cwd)
+        if err:
+            await message.reply_text(err)
+            return
+        if not rel_path:
+            # 静默忽略（如贴纸）
+            return
+        text = _build_file_prompt(rel_path, ext, text)
+
+    if not text:
+        return
+
+    log.info(f"[msg] key={session_key} proj={Path(cwd).name} text={text[:80]}")
 
     # 如果有活跃的终端会话，通过 tmux 注入
     from src.api_server import terminal_sessions
@@ -561,9 +682,19 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    # 文本消息
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & (filters.ChatType.SUPERGROUP | filters.ChatType.PRIVATE),
+            handle_message,
+        )
+    )
+    # 文件附件（图片、文档等）
+    app.add_handler(
+        MessageHandler(
+            (filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO
+             | filters.VOICE | filters.Sticker.ALL)
+            & (filters.ChatType.SUPERGROUP | filters.ChatType.PRIVATE),
             handle_message,
         )
     )
