@@ -8,22 +8,28 @@ import logging
 from pathlib import Path
 
 from src.config import STATE_FILE
+from src import projects
 
 log = logging.getLogger("code-anywhere.state")
 
 # 全局状态
 topic_dirs: dict[int, str] = {}     # session_key → 工作目录
 last_dir: str | None = None         # 最近一次 /cd 选择
+trusted_dirs: set[str] = set()      # 信任的项目目录（自动允许所有工具）
 
 
 def load():
-    global last_dir, topic_dirs
+    global last_dir, topic_dirs, trusted_dirs
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text())
             last_dir = state.get("last_dir")
             topic_dirs = {int(k): v for k, v in state.get("topic_dirs", {}).items()}
-            log.info(f"[state] loaded: last_dir={last_dir}, {len(topic_dirs)} topics")
+            trusted_dirs = set(state.get("trusted_dirs", []))
+            log.info(
+                f"[state] loaded: last_dir={last_dir}, "
+                f"{len(topic_dirs)} topics, {len(trusted_dirs)} trusted"
+            )
         except Exception as e:
             log.warning(f"[state] load failed: {e}")
 
@@ -35,7 +41,28 @@ def save():
         "last_dir": last_dir,
         "topic_dirs": {str(k): v for k, v in topic_dirs.items()},
         "session_ids": session_ids,
+        "trusted_dirs": sorted(trusted_dirs),
     }, ensure_ascii=False))
+
+
+def _norm(cwd: str) -> str:
+    try:
+        return str(Path(cwd).resolve())
+    except Exception:
+        return cwd
+
+
+def is_trusted(cwd: str) -> bool:
+    return _norm(cwd) in trusted_dirs
+
+
+def set_trusted(cwd: str, value: bool):
+    p = _norm(cwd)
+    if value:
+        trusted_dirs.add(p)
+    else:
+        trusted_dirs.discard(p)
+    save()
 
 
 def get_cwd(session_key: int) -> str | None:
@@ -70,10 +97,8 @@ def set_resume_id(key: int, session_id: str):
 
 def scan_project_sessions(project_dir: str, limit: int = 10) -> list[dict]:
     """扫描项目的 Claude Code 历史会话"""
-    claude_projects = Path.home() / ".claude" / "projects"
-    dir_hash = project_dir.replace("/", "-")
-    proj_path = claude_projects / dir_hash
-    if not proj_path.is_dir():
+    proj_path = projects.claude_dir(project_dir)
+    if not proj_path:
         return []
 
     sessions = []
@@ -109,10 +134,8 @@ def scan_project_sessions(project_dir: str, limit: int = 10) -> list[dict]:
 
 def get_recent_history(project_dir: str, max_turns: int = 5) -> list[dict]:
     """读取项目最新 session 的最近几轮对话"""
-    claude_projects = Path.home() / ".claude" / "projects"
-    dir_hash = project_dir.replace("/", "-")
-    proj_path = claude_projects / dir_hash
-    if not proj_path.is_dir():
+    proj_path = projects.claude_dir(project_dir)
+    if not proj_path:
         return []
 
     jsonl_files = sorted(proj_path.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
@@ -158,10 +181,8 @@ def get_recent_history(project_dir: str, max_turns: int = 5) -> list[dict]:
 
 def get_latest_session_id(project_dir: str) -> str | None:
     """获取项目最新的 session_id（按 mtime 排序）"""
-    claude_projects = Path.home() / ".claude" / "projects"
-    dir_hash = project_dir.replace("/", "-")
-    proj_path = claude_projects / dir_hash
-    if not proj_path.is_dir():
+    proj_path = projects.claude_dir(project_dir)
+    if not proj_path:
         return None
 
     jsonl_files = sorted(proj_path.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)

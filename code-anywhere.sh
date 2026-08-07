@@ -86,6 +86,17 @@ _is_running() {
     return 1
 }
 
+# 按端口找占用进程（兜底，捕获 PID 文件管不到的孤儿）
+_port_holder() {
+    local port=${1:-5000}
+    lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null
+}
+
+# 按特征找所有 src.main 进程（uv 父进程 + python 子进程）
+_all_main_pids() {
+    pgrep -f "python.*-m src\.main" 2>/dev/null
+}
+
 _status_line() {
     if _is_running; then
         local pid
@@ -109,6 +120,23 @@ do_start() {
     _banner
 
     mkdir -p "$LOG_DIR"
+
+    # 预检：端口占用 + 孤儿进程（PID 文件管不到的）
+    local port
+    port=$(grep -E '^BOT_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- | xargs)
+    port=${port:-5000}
+    local holder orphans
+    holder=$(_port_holder "$port" || true)
+    orphans=$(_all_main_pids || true)
+    if [ -n "$holder" ] || [ -n "$orphans" ]; then
+        echo -e "${RED}启动前预检失败：发现占用/孤儿进程${NC}"
+        [ -n "$holder" ]  && echo -e "  端口 $port 被占用: PID $holder"
+        [ -n "$orphans" ] && echo -e "  src.main 残留进程: $(echo $orphans | tr '\n' ' ')"
+        echo ""
+        echo -e "  运行 ${CYAN}./code-anywhere.sh doctor${NC} 查看详情"
+        echo -e "  运行 ${CYAN}./code-anywhere.sh stop${NC} 清理后再启动"
+        exit 1
+    fi
 
     echo -e "  模式:    ${GREEN}后台运行${NC}"
     echo -e "  日志:    $LOG_FILE"
@@ -135,27 +163,46 @@ do_start() {
 }
 
 do_stop() {
-    if ! _is_running; then
+    local port
+    port=$(grep -E '^BOT_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- | xargs)
+    port=${port:-5000}
+
+    # 收集所有相关 PID：PID 文件 + 端口占用 + 进程名匹配
+    local pids=""
+    [ -f "$PID_FILE" ] && pids=$(cat "$PID_FILE")
+    pids="$pids $(_port_holder "$port" || true) $(_all_main_pids || true)"
+    # 去重
+    pids=$(echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+
+    if [ -z "$pids" ]; then
         echo -e "${YELLOW}$APP_NAME 未在运行${NC}"
+        rm -f "$PID_FILE"
         return 0
     fi
 
-    local pid
-    pid=$(cat "$PID_FILE")
-    echo -ne "停止 $APP_NAME (PID $pid)... "
+    echo -ne "停止 $APP_NAME (PID $pids)... "
+    kill $pids 2>/dev/null || true
 
-    kill "$pid" 2>/dev/null
-
-    # 等待进程退出（最多 10 秒）
+    # 等待全部退出（最多 10 秒）
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while [ $count -lt 10 ]; do
+        local alive=""
+        for p in $pids; do
+            kill -0 "$p" 2>/dev/null && alive="$alive $p"
+        done
+        [ -z "$alive" ] && break
         sleep 1
         count=$((count + 1))
     done
 
-    if kill -0 "$pid" 2>/dev/null; then
-        echo -e "${YELLOW}强制终止${NC}"
-        kill -9 "$pid" 2>/dev/null
+    # 仍存活的 → SIGKILL
+    local stubborn=""
+    for p in $pids; do
+        kill -0 "$p" 2>/dev/null && stubborn="$stubborn $p"
+    done
+    if [ -n "$stubborn" ]; then
+        echo -e "${YELLOW}强制终止 ($stubborn)${NC}"
+        kill -9 $stubborn 2>/dev/null || true
     fi
 
     rm -f "$PID_FILE"
@@ -238,6 +285,74 @@ do_status() {
     echo ""
 }
 
+do_doctor() {
+    _banner
+    echo -e "  ${BOLD}诊断${NC}"
+    echo ""
+
+    local port
+    port=$(grep -E '^BOT_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- | xargs)
+    port=${port:-5000}
+
+    # PID 文件
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "  PID 文件:    ${GREEN}$pid (存活)${NC}"
+        else
+            echo -e "  PID 文件:    ${RED}$pid (死亡，但文件残留)${NC}"
+        fi
+    else
+        echo -e "  PID 文件:    ${YELLOW}不存在${NC}"
+    fi
+
+    # 端口
+    local holder
+    holder=$(_port_holder "$port" || true)
+    if [ -n "$holder" ]; then
+        echo -e "  端口 $port:  ${GREEN}$holder${NC}"
+    else
+        echo -e "  端口 $port:  ${YELLOW}空闲${NC}"
+    fi
+
+    # 所有 src.main 进程
+    local mains
+    mains=$(_all_main_pids || true)
+    echo ""
+    echo -e "  ${BOLD}所有 src.main 进程${NC}"
+    if [ -n "$mains" ]; then
+        for p in $mains; do
+            ps -o pid=,etime=,command= -p "$p" 2>/dev/null | sed 's/^/    /'
+        done
+    else
+        echo -e "    ${YELLOW}(无)${NC}"
+    fi
+
+    # 一致性检查
+    echo ""
+    local pid_in_file=""
+    [ -f "$PID_FILE" ] && pid_in_file=$(cat "$PID_FILE")
+    local mismatch=0
+    for p in $mains; do
+        if [ "$p" != "$pid_in_file" ]; then
+            # 检查是不是 PID 文件进程的子进程
+            local ppid
+            ppid=$(ps -o ppid= -p "$p" 2>/dev/null | xargs)
+            if [ "$ppid" != "$pid_in_file" ]; then
+                mismatch=1
+            fi
+        fi
+    done
+    if [ $mismatch -eq 1 ]; then
+        echo -e "  ${RED}● 发现孤儿进程（PID 文件管不到）${NC}"
+        echo -e "    用 ${CYAN}./code-anywhere.sh stop${NC} 一键清理"
+    else
+        echo -e "  ${GREEN}● 状态一致${NC}"
+    fi
+    echo ""
+}
+
 do_debug() {
     if _is_running; then
         local pid
@@ -265,6 +380,7 @@ case "${1:-}" in
     status)  do_status  ;;
     log)     do_log     ;;
     debug)   do_debug   ;;
+    doctor)  do_doctor  ;;
     *)
         echo -e "${BOLD}Code Anywhere${NC} — 服务管理"
         echo ""
@@ -274,6 +390,7 @@ case "${1:-}" in
         echo -e "  ${GREEN}./code-anywhere.sh status${NC}    查看服务状态"
         echo -e "  ${GREEN}./code-anywhere.sh log${NC}       查看实时日志"
         echo -e "  ${GREEN}./code-anywhere.sh debug${NC}     前台调试模式"
+        echo -e "  ${GREEN}./code-anywhere.sh doctor${NC}    诊断（检查孤儿进程）"
         echo ""
         _status_line
         ;;

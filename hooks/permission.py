@@ -27,6 +27,24 @@ if _cwd == _self_dir:
 if os.environ.get("CODE_ANYWHERE_SKIP"):
     sys.exit(0)
 
+# 项目级"信任模式" → 直接 allow，不走 TG 审批
+# 匹配规则：cwd 等于信任路径 或 cwd 在信任路径下（含子目录）
+_state_file = pathlib.Path(__file__).parent.parent / ".state.json"
+try:
+    _resolved = str(pathlib.Path(_cwd).resolve()) if _cwd else ""
+    if _state_file.exists() and _resolved:
+        _state = json.loads(_state_file.read_text())
+        _trusted_set = _state.get("trusted_dirs", [])
+        if any(_resolved == t or _resolved.startswith(t.rstrip("/") + "/") for t in _trusted_set):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "Trusted project",
+            }}))
+            sys.exit(0)
+except Exception:
+    pass
+
 tool_name = data.get("tool_name", "?")
 tool_input = data.get("tool_input", {})
 

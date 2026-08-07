@@ -6,6 +6,7 @@ from src.config import BOT_TOKEN, BOT_PORT, ALLOW_ALL, ALLOWED_USERS
 from src.log import setup_logging
 from src.bot import create_app
 from src.api_server import start_api_server, set_bot
+from src.polling import run_app
 from src import projects as proj
 
 BANNER = r"""
@@ -52,7 +53,9 @@ def main():
     app.post_init = combined_post_init
 
     log.info("Bot 启动")
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    # 不用 app.run_polling —— PTB 的 Updater 轮询协程会被非 TelegramError 异常静默打死
+    # （假死根因，详见 src/polling.py 模块注释与 recon/PROGRESS.md 阶段 4.1）
+    asyncio.run(run_app(app, allowed_updates=["message", "callback_query"]))
 
 
 if __name__ == "__main__":

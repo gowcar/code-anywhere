@@ -591,7 +591,15 @@ def main():
 """
     )
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # long-poll 显式超时：避 TCP 半死连接导致 getUpdates 永远卡住（PTB 默认漏）
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .get_updates_read_timeout(60)
+        .get_updates_connect_timeout(15)
+        .get_updates_pool_timeout(10)
+        .build()
+    )
 
     async def post_init(application):
         await application.bot.set_my_commands([

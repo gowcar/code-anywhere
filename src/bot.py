@@ -1,6 +1,7 @@
 """Telegram Bot — 命令路由 + 消息处理"""
 
 import asyncio
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -28,6 +29,7 @@ from src.claude_runner import (
 from src.renderer import split_message, format_tool_use, send_ephemeral
 from src import state
 from src import projects
+from src import recon
 
 log = logging.getLogger("code-anywhere.bot")
 
@@ -128,6 +130,51 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ============ /trust ============
+
+# callback_data 限制 64 字节，路径塞不下 → 短 hash 映射
+_trust_id_to_path: dict[str, str] = {}
+
+
+def _path_id(p: str) -> str:
+    h = hashlib.sha256(p.encode()).hexdigest()[:10]
+    _trust_id_to_path[h] = p
+    return h
+
+
+def _trust_keyboard() -> InlineKeyboardMarkup:
+    bound = [p for p in projects.discover() if p["bound"]]
+    rows = []
+    for p in bound:
+        trusted = state.is_trusted(p["path"])
+        icon = "✅" if trusted else "❌"
+        rows.append([InlineKeyboardButton(
+            f"{icon} {p['name']}",
+            callback_data=f"tt:{_path_id(p['path'])}",
+        )])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """项目信任开关：信任后跳过 TG 审批，自动允许所有工具"""
+    if not auth_check(update.effective_user.id):
+        return
+    bound = [p for p in projects.discover() if p["bound"]]
+    if not bound:
+        await update.message.reply_text("暂无已绑定的项目")
+        return
+    text = (
+        "<b>项目信任开关</b>\n"
+        "✅ 已信任 → 自动允许所有工具调用\n"
+        "❌ 未信任 → 需要 TG 审批"
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=_trust_keyboard(),
+        parse_mode="HTML",
+    )
+
+
 # ============ /status ============
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,9 +198,55 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not auth_check(query.from_user.id):
         return
-    await query.answer()
     data = query.data
     chat_id = query.message.chat_id
+
+    # 权限审批：先唤醒等待中的请求（最关键），再做 UI 反馈
+    if data.startswith("pa:") or data.startswith("pd:"):
+        from src.api_server import handle_permission_callback
+        request_id = data[3:]
+        decision = "allow" if data.startswith("pa:") else "deny"
+        await handle_permission_callback(request_id, decision)
+        icon = "✅" if decision == "allow" else "❌"
+        # query.answer 和 edit 都可能因 query 过期失败 — 容错处理
+        try:
+            await query.answer()
+        except Exception as e:
+            log.warning(f"[callback] answer 失败（忽略）: {e}")
+        try:
+            await query.edit_message_text(
+                f"{icon} 已{('允许' if decision == 'allow' else '拒绝')}",
+            )
+        except Exception as e:
+            log.warning(f"[callback] edit 失败（忽略）: {e}")
+        return
+
+    try:
+        await query.answer()
+    except Exception as e:
+        log.warning(f"[callback] answer 失败（忽略）: {e}")
+
+    # 项目信任开关
+    if data.startswith("tt:"):
+        path_id = data[3:]
+        path = _trust_id_to_path.get(path_id)
+        if not path:
+            try:
+                await query.answer("ID 已失效，请重新 /trust", show_alert=True)
+            except Exception:
+                pass
+            return
+        new_val = not state.is_trusted(path)
+        state.set_trusted(path, new_val)
+        try:
+            await query.answer(f"{'已信任' if new_val else '已取消信任'}: {Path(path).name}")
+        except Exception:
+            pass
+        try:
+            await query.edit_message_reply_markup(reply_markup=_trust_keyboard())
+        except Exception as e:
+            log.warning(f"[trust] edit markup 失败（忽略）: {e}")
+        return
 
     if data == "new":
         topic_id = query.message.message_thread_id
@@ -162,18 +255,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 标记强制新建（不 resume）
             state.set_resume_id(topic_id, "__new__")
             await query.edit_message_text("新会话已就绪，发消息开始。")
-        return
-
-    if data.startswith("pa:") or data.startswith("pd:"):
-        # 权限审批按钮
-        from src.api_server import handle_permission_callback
-        request_id = data[3:]
-        decision = "allow" if data.startswith("pa:") else "deny"
-        await handle_permission_callback(request_id, decision)
-        icon = "✅" if decision == "allow" else "❌"
-        await query.edit_message_text(
-            f"{icon} 已{('允许' if decision == 'allow' else '拒绝')}",
-        )
         return
 
     if data.startswith("r:"):
@@ -192,21 +273,264 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ 消息处理 ============
 
 async def _inject_tmux(pane: str, text: str):
-    """通过 tmux send-keys 注入文本到终端"""
-    proc = await asyncio.create_subprocess_exec(
-        "tmux", "send-keys", "-t", pane, "-l", text,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.wait()
-    # 发送 Enter
+    """通过 tmux 把文本注入到 claude REPL，再回车提交。
+
+    多行文本走 bracketed paste（set-buffer + paste-buffer -p）：claude REPL 会
+    把它识别成「一次粘贴」，内嵌换行不再被当成逐行提交 —— 否则多行脚本会在
+    第一个换行处就被拆断、只提交半截（长期潜伏的老坑：单行没事、多行 heredoc
+    一发就散架）。单行仍走 send-keys -l，行为完全不变、零风险。
+    """
+    mode = "paste" if "\n" in text else "keys"
+    if mode == "paste":
+        buf = "ca_inject"  # 具名 buffer，用完即删，不污染默认 buffer 栈
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "set-buffer", "-b", buf, "--", text,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", pane,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        await asyncio.sleep(0.1)  # 给 REPL 一点时间把粘贴内容落进输入框
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", pane, "-l", text,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+    # 发送 Enter 提交（bracketed paste 的换行不提交，只有这个 Enter 提交整块）
     proc = await asyncio.create_subprocess_exec(
         "tmux", "send-keys", "-t", pane, "Enter",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     await proc.wait()
-    log.info(f"[tmux] injected to {pane}: {text[:60]}")
+    log.info(f"[tmux] injected to {pane} ({mode}): {text[:60]}")
+
+
+_SHELL_CMDS = {"fish", "bash", "zsh", "sh", "tcsh", "csh", "ksh", "dash"}
+
+
+async def _pane_has_claude(pane_id: str) -> bool:
+    """检测 pane 的 tty 上是否有 claude 进程在跑
+
+    macOS 上 `pane_current_command` 不可靠（fish→claude 可能返回 fish），
+    因此走 ps 查 tty 进程列表，看是否存在名为 `claude` 的进程。
+    """
+    if not pane_id:
+        return False
+    try:
+        p1 = await asyncio.create_subprocess_exec(
+            "tmux", "display-message", "-p", "-t", pane_id, "#{pane_tty}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await p1.communicate()
+        tty = (out.decode(errors="ignore").strip())
+        if not tty:
+            return False
+        tty_name = tty.rsplit("/", 1)[-1]
+        p2 = await asyncio.create_subprocess_exec(
+            "ps", "-t", tty_name, "-o", "comm=",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out2, _ = await p2.communicate()
+        for line in out2.decode(errors="ignore").splitlines():
+            name = line.strip().rsplit("/", 1)[-1]
+            if name == "claude":
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None) -> str | None:
+    """在 tmux 中给 cwd 起一个 claude pane。复用现有 tmux session（第一个可见的），没有则建一个。
+
+    步骤：
+      1. new-window -c <cwd> -P -F '#{pane_id}' claude 拿新 pane_id
+      2. 轮询 _pane_has_claude(pane_id)，最多 15s
+      3. hook 触发后 pane 自带 @ca_project 标签，下轮 _find_pane_for_project 也能命中
+    """
+    try:
+        norm_cwd = str(Path(cwd).resolve())
+    except Exception:
+        return None
+
+    # 找一个已存在的 tmux session，没有就建
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "list-sessions", "-F", "#{session_name}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        sessions = [s for s in out.decode(errors="ignore").splitlines() if s.strip()]
+    except Exception:
+        sessions = []
+
+    tmux_session = sessions[0] if sessions else "kin"
+    if not sessions:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "tmux", "new-session", "-d", "-s", tmux_session, "-c", str(Path.home()),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except Exception as e:
+            log.warning(f"[ensure_pane] tmux new-session failed: {e}")
+            return None
+
+    # 起 new-window 跑 claude；-P -F 拿新 pane id
+    # 关键：tmux server env 通常无 CLAUDE_CODE_OAUTH_TOKEN，claude 会秒退 → 用 -e 从当前进程 env 显式传
+    proj_name = Path(norm_cwd).name
+    import os as _os
+    tmux_env_args: list[str] = []
+    for env_key in ("CLAUDE_CODE_OAUTH_TOKEN",):
+        v = _os.environ.get(env_key)
+        if v:
+            tmux_env_args += ["-e", f"{env_key}={v}"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "new-window", "-t", tmux_session, "-c", norm_cwd, "-n", proj_name,
+            *tmux_env_args,
+            "-P", "-F", "#{pane_id}", "claude",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            log.warning(f"[ensure_pane] tmux new-window failed: {err.decode(errors='ignore')}")
+            return None
+        pane_id = out.decode(errors="ignore").strip()
+    except Exception as e:
+        log.warning(f"[ensure_pane] tmux new-window error: {e}")
+        return None
+
+    if not pane_id:
+        return None
+    log.info(f"[ensure_pane] created pane={pane_id} for {proj_name}")
+
+    # 等 claude 起来（最多 15s），且要求持续存在 ≥ 2s（防秒退 fallback 到 fish 的假 ready）
+    stable_since: float | None = None
+    ready = False
+    for _ in range(30):
+        await asyncio.sleep(0.5)
+        alive = await _pane_has_claude(pane_id)
+        if alive:
+            if stable_since is None:
+                stable_since = time.time()
+            elif time.time() - stable_since >= 2.0:
+                log.info(f"[ensure_pane] pane={pane_id} claude ready & stable")
+                ready = True
+                break
+        else:
+            if stable_since is not None:
+                log.warning(f"[ensure_pane] pane={pane_id} claude 秒退（可能 auth 失败），放弃")
+                return None
+            stable_since = None
+
+    if not ready:
+        log.warning(f"[ensure_pane] pane={pane_id} claude 未在 15s 内就绪")
+        return None
+
+    # 主动给这个 pane 注册 watcher — 不依赖 SessionStart hook 自动触发
+    # （新 pane 起 claude 时 hook 不总是能触发，具体原因未知；直接注册最可靠）
+    try:
+        from src.api_server import register_pane_watcher
+        await register_pane_watcher(pane_id, norm_cwd)
+    except Exception as e:
+        log.warning(f"[ensure_pane] register_pane_watcher failed: {e}")
+
+    return pane_id
+
+
+async def _find_pane_for_project(cwd: str) -> str | None:
+    """实时扫 tmux 找匹配 project cwd 的 pane
+
+    优先级：
+    0. terminal_sessions 中该 cwd 对应的活跃 watcher 的 pane（与 watcher 选的同一个，保证注入与监听一致）
+    1. pane 带 @ca_project 标签且解析后等于 cwd（hook 启动时打上的，明确归属）
+    2. pane_current_path 等于 cwd 或在 cwd 之下（fallback：老 pane 没标签时）
+    多个匹配按 pane_id 排序取第一个；pane 关闭后 tmux 自动清理，无需 GC。
+    """
+    try:
+        norm_cwd = str(Path(cwd).resolve())
+    except Exception:
+        return None
+
+    # 优先级 0：与 watcher 注册的 pane 对齐（避免一个项目多个 pane 时注入与监听走不同 pane）
+    try:
+        from src.api_server import terminal_sessions
+        for info in terminal_sessions.values():
+            info_cwd = info.get("cwd") or ""
+            if not info_cwd:
+                continue
+            try:
+                if str(Path(info_cwd).resolve()) != norm_cwd:
+                    continue
+            except Exception:
+                continue
+            pane = info.get("tmux_pane") or ""
+            if pane and await _pane_has_claude(pane):
+                return pane
+    except Exception:
+        pass
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "list-panes", "-aF",
+            "#{pane_id}\t#{@ca_project}\t#{pane_current_path}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+    except Exception as e:
+        log.warning(f"[find_pane] tmux list-panes failed: {e}")
+        return None
+
+    # 先按标签 / cwd 收候选；alive 判定用 ps（macOS 上 pane_current_command 不可靠）
+    raw_candidates: list[tuple[int, str]] = []  # (priority, pane_id)
+    for line in out.decode(errors="ignore").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        pane_id = parts[0]
+        ca_project = parts[1]
+        current_path = parts[2]
+        # 优先级 1：标签匹配
+        if ca_project:
+            try:
+                if str(Path(ca_project).resolve()) == norm_cwd:
+                    raw_candidates.append((1, pane_id))
+                    continue
+            except Exception:
+                pass
+        # 优先级 2：cwd 包含匹配
+        if current_path:
+            try:
+                cp = str(Path(current_path).resolve())
+                if cp == norm_cwd or cp.startswith(norm_cwd.rstrip("/") + "/"):
+                    raw_candidates.append((2, pane_id))
+            except Exception:
+                pass
+
+    # 用 ps 二次过滤：只保留 tty 上真有 claude 进程的 pane
+    candidates: list[tuple[int, str]] = []
+    for prio, pid in raw_candidates:
+        if await _pane_has_claude(pid):
+            candidates.append((prio, pid))
+
+    if not candidates:
+        return None
+    candidates.sort()
+    if len(candidates) > 1:
+        log.warning(f"[find_pane] {cwd} 匹配到 {len(candidates)} 个 pane: {candidates} → 选 {candidates[0][1]}")
+    return candidates[0][1]
 
 
 async def _keep_typing(bot, chat_id: int, topic_id: int | None):
@@ -216,6 +540,28 @@ async def _keep_typing(bot, chat_id: int, topic_id: int | None):
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
+
+
+# 终端注入路径的 typing 任务：topic_id → Task
+# 由 bot 注入 tmux 时启动，由 api_server watcher 收到 assistant 文本块或 session_stop 时停止
+pending_typing: dict[int, asyncio.Task] = {}
+
+
+def start_typing(bot, chat_id: int, topic_id: int):
+    """为终端注入路径启动 typing。若已有任务，先取消再启新的（重置计时）。"""
+    old = pending_typing.pop(topic_id, None)
+    if old and not old.done():
+        old.cancel()
+    pending_typing[topic_id] = asyncio.create_task(
+        _keep_typing(bot, chat_id, topic_id)
+    )
+
+
+def stop_typing(topic_id: int):
+    """停止指定 topic 的 typing 任务（由 watcher / session_stop 调用）。"""
+    task = pending_typing.pop(topic_id, None)
+    if task and not task.done():
+        task.cancel()
 
 
 async def _send_tg(message, text: str):
@@ -274,11 +620,18 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
     if not file_obj:
         return None, None, ""
 
-    # 检查文件大小（photo 没有 file_size 属性，需要 get_file 后检查）
-    try:
-        tg_file = await file_obj.get_file()
-    except Exception as e:
-        return None, None, f"获取文件失败: {e}"
+    # 获取文件信息（带重试，防止偶发超时）
+    tg_file = None
+    for attempt in range(3):
+        try:
+            tg_file = await file_obj.get_file(read_timeout=30, connect_timeout=15)
+            break
+        except Exception as e:
+            if attempt < 2:
+                log.warning(f"[attachment] get_file 第{attempt+1}次失败: {e}, 重试...")
+                await asyncio.sleep(1)
+            else:
+                return None, None, f"获取文件失败（重试3次）: {e}"
 
     if tg_file.file_size and tg_file.file_size > MAX_FILE_SIZE:
         return None, None, f"文件太大（{tg_file.file_size // 1024 // 1024}MB），限制 10MB"
@@ -293,38 +646,30 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
     local_path = attachments_dir / local_name
 
     try:
-        await tg_file.download_to_drive(str(local_path))
+        await tg_file.download_to_drive(str(local_path), read_timeout=30, connect_timeout=15)
     except Exception as e:
         return None, None, f"下载文件失败: {e}"
 
     ext = Path(file_name).suffix.lower()
     rel_path = f".attachments/{local_name}"
     log.info(f"[attachment] saved {rel_path} ({tg_file.file_size or '?'} bytes)")
+    # 控上下文：清理旧附件，避免 .attachments 膨胀（图的价值应已由 claude 落盘成文字）
+    n = recon.cleanup_attachments(cwd)
+    if n:
+        log.info(f"[attachment] 清理 {n} 个旧附件")
     return rel_path, ext, ""
 
 
 def _build_file_prompt(rel_path: str, ext: str, caption: str) -> str:
-    """根据文件类型构建发给 Claude CLI 的 prompt"""
-    if ext in _IMAGE_EXT:
-        desc = "一张图片"
-        action = "请查看并分析"
-    elif ext in _PDF_EXT:
-        desc = "一个 PDF 文件"
-        action = "请阅读"
-    elif ext in _TEXT_EXT:
-        desc = "一个文本文件"
-        action = "请查看"
-    elif ext in _OFFICE_EXT:
-        desc = "一个 Office 文档"
-        action = "请读取内容"
-    else:
-        desc = "一个文件"
-        action = "请尝试查看"
+    """用 @path 引用文件。Claude CLI 2.x 会自动 attach：图片→vision、文本/PDF→inline。
 
-    prompt = f"用户发送了{desc}（已保存到 {rel_path}），{action}。"
+    不再走 Read 工具，省一跳 tool call + 免 permission 弹窗。
+    caption 为空时用默认询问。
+    """
+    ref = f"@{rel_path}"
     if caption:
-        prompt += f"\n用户说：{caption}"
-    return prompt
+        return f"{ref}\n{caption}"
+    return f"{ref}\n看看这个"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -349,6 +694,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = message.text or message.caption or ""
+
+    # 提取被引用消息的内容（用户回复某条消息时）
+    quoted_text = ""
+    if message.reply_to_message and message.reply_to_message.message_id != topic_id:
+        # 排除回复话题创建消息（message_id == topic_id）
+        reply = message.reply_to_message
+        if reply.text:
+            quoted_text = reply.text
+        elif reply.caption:
+            quoted_text = reply.caption
 
     # 自动检测群组 CHAT_ID
     if not is_private and not config.CHAT_ID:
@@ -383,141 +738,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 静默忽略（如贴纸）
             return
         text = _build_file_prompt(rel_path, ext, text)
+        # 给用户反馈：文件已收到，正在处理
+        await message.reply_text("📎 文件已接收，正在读取分析...")
+
+    # 拼接引用内容
+    if quoted_text:
+        truncated_quote = quoted_text[:2000]
+        if len(quoted_text) > 2000:
+            truncated_quote += "..."
+        if text:
+            text = f"[引用消息]\n{truncated_quote}\n[/引用消息]\n\n{text}"
+        else:
+            text = f"用户引用了以下消息，请分析：\n\n{truncated_quote}"
 
     if not text:
         return
 
     log.info(f"[msg] key={session_key} proj={Path(cwd).name} text={text[:80]}")
 
-    # 如果有活跃的终端会话，通过 tmux 注入
-    from src.api_server import terminal_sessions
-    for sid, info in terminal_sessions.items():
-        if info.get("topic_id") == session_key and info.get("tmux_pane"):
-            await _inject_tmux(info["tmux_pane"], text)
-            return
-
-    typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id, topic_id))
-
-    try:
-        session = active_sessions.get(session_key)
-        is_new = (
-            session is None
-            or session.proc is None
-            or session.proc.returncode is not None
-            or not session.ready
+    # 找/建 tmux pane 并注入。定位约束：TG/web 是远控入口，不自己 spawn claude subprocess
+    target_pane = await _find_pane_for_project(cwd)
+    if not target_pane:
+        target_pane = await _ensure_pane_for_project(cwd, chat_id, message.message_thread_id)
+    if not target_pane:
+        await message.reply_text(
+            "⚠️ 起 claude pane 失败。请手动 tmux new-window 到此项目跑 claude。"
         )
+        return
 
-        if is_new:
-            session = await get_or_create_session(session_key, cwd, first_message=text)
-        else:
-            while session.busy:
-                await asyncio.sleep(0.3)
-            await send_message(session, text)
-
-        session.busy = True
-        turn_count = 0
-
-        # 流式消息状态
-        streaming_msg = None       # 当前正在流式更新的 TG 消息
-        streaming_text = ""        # 已累积的文本
-        last_edit_time = 0         # 上次编辑 TG 消息的时间
-        EDIT_INTERVAL = 1.0        # 编辑间隔（秒），避免 TG 限频
-        streaming_block_type = None  # 当前 content_block 类型
-
-        async def _flush_streaming():
-            """将累积的流式文本刷新到 TG 消息"""
-            nonlocal streaming_msg, streaming_text, last_edit_time
-            if not streaming_text or not streaming_msg:
-                return
-            try:
-                display = streaming_text[:4000] + ("..." if len(streaming_text) > 4000 else "")
-                await streaming_msg.edit_text(f"🤖 {display}")
-                last_edit_time = time.time()
-            except Exception as e:
-                log.debug(f"[stream] edit failed: {e}")
-
-        while True:
-            try:
-                event = await asyncio.wait_for(session._response_queue.get(), timeout=300)
-            except asyncio.TimeoutError:
-                await _flush_streaming()
-                await message.reply_text("Claude 响应超时")
-                break
-
-            if event is None:
-                await _flush_streaming()
-                active_sessions.pop(session_key, None)
-                await message.reply_text("Claude 进程退出，请重新发消息")
-                break
-
-            event_type = event.get("type")
-
-            if event_type == "content_block_start":
-                block = event.get("content_block", {})
-                streaming_block_type = block.get("type")
-                if streaming_block_type == "text":
-                    # 新的文本块开始 → 发一条占位消息
-                    streaming_text = ""
-                    streaming_msg = await message.reply_text("🤖 ...")
-                    last_edit_time = time.time()
-                elif streaming_block_type == "tool_use":
-                    turn_count += 1
-
-            elif event_type == "content_block_delta":
-                delta = event.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    streaming_text += delta.get("text", "")
-                    # 节流：间隔 >= EDIT_INTERVAL 才更新
-                    if time.time() - last_edit_time >= EDIT_INTERVAL and streaming_msg:
-                        await _flush_streaming()
-
-            elif event_type == "content_block_stop":
-                if streaming_block_type == "text" and streaming_msg:
-                    # 文本块结束 → 最后一次刷新
-                    await _flush_streaming()
-                    streaming_msg = None
-                streaming_block_type = None
-
-            elif event_type == "assistant":
-                # 完整消息事件（兜底：处理非流式场景 + tool_use 汇总）
-                for block in event.get("message", {}).get("content", []):
-                    block_type = block.get("type")
-                    if block_type == "text":
-                        # 如果流式已处理过，跳过；否则兜底发送
-                        if not streaming_text:
-                            reply_text = block.get("text", "").strip()
-                            if reply_text:
-                                await _send_tg(message, reply_text)
-                        streaming_text = ""
-                    elif block_type == "tool_use":
-                        desc = format_tool_use(block.get("name", "?"), block.get("input", {}))
-                        await send_ephemeral(
-                            context.bot, chat_id,
-                            f"[{turn_count}] {desc}",
-                            message_thread_id=topic_id,
-                        )
-
-            elif event_type == "result":
-                await _flush_streaming()
-                sid = event.get("session_id")
-                if sid:
-                    session.session_id = sid
-                    state.save()
-                if event.get("is_error"):
-                    await message.reply_text(f"错误: {event.get('result', '?')}")
-                log.info(f"[done] key={session_key} turns={event.get('num_turns')}")
-                break
-
-        session.busy = False
-
-    except Exception as e:
-        log.error(f"[error] key={session_key}: {e}", exc_info=True)
-        await message.reply_text(f"出错: {e}")
-        bad = active_sessions.pop(session_key, None)
-        if bad and bad.proc and bad.proc.returncode is None:
-            bad.proc.terminate()
-    finally:
-        typing_task.cancel()
+    # 标记：来源=TG（watcher 跳过 user event ephemeral 避免重复）+ 本轮首条 assistant text 应 quote-reply 到这条用户消息
+    if not is_private and topic_id:
+        from src.api_server import mark_tg_input, mark_tg_reply_target
+        mark_tg_input(topic_id, text)
+        mark_tg_reply_target(topic_id, message.message_id)
+    await _inject_tmux(target_pane, text)
+    start_typing(context.bot, chat_id, session_key)
 
 
 # ============ 构建 App ============
@@ -575,14 +830,65 @@ def _save_chat_id(chat_id: int):
     log.info(f"[config] CHAT_ID={chat_id} saved to .env")
 
 
+async def _purge_topic_state(topic_id: int, path: str | None):
+    """彻底清理 topic 相关的所有持久化与运行时状态"""
+    projects.unbind(topic_id)
+    state.topic_dirs.pop(topic_id, None)
+    if path:
+        try:
+            state.trusted_dirs.discard(state._norm(path))
+        except Exception:
+            pass
+        state.trusted_dirs.discard(path)
+    try:
+        state.save()
+    except Exception as e:
+        log.warning(f"[purge] state.save 失败: {e}")
+    from src.claude_runner import active_sessions, kill_session
+    if topic_id in active_sessions:
+        kill_session(topic_id)
+    from src.api_server import _watchers, terminal_sessions
+    task = _watchers.pop(topic_id, None)
+    if task:
+        task.cancel()
+    for sid in list(terminal_sessions.keys()):
+        if terminal_sessions[sid].get("topic_id") == topic_id:
+            terminal_sessions.pop(sid, None)
+
+
 async def sync_all_projects(bot, chat_id: int):
     """自动为所有未绑定的近期活跃项目创建 Topic（去重 + 清理无效绑定）"""
     import time
     cutoff = time.time() - 30 * 86400
 
-    # 先验证已有绑定的话题是否还存在，清理无效的
-    # 策略：unpinAllForumTopicMessages — 完全静默无副作用，话题不存在时抛 BadRequest
     from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter
+
+    # 工作目录已删除 → 删 TG topic + 清 state（保持与磁盘一致）
+    for topic_id in list(projects.all_bindings().keys()):
+        path = projects.get_path(topic_id)
+        if not path or Path(path).is_dir():
+            continue
+        topic_name = Path(path).name
+        log.info(f"[sync] 工作目录消失 → 清理 topic {topic_id} ({topic_name}): {path}")
+        deleted_ok = True
+        try:
+            await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=topic_id)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "thread" in err and ("not found" in err or "invalid" in err):
+                pass  # 已经被手动删了，照样清 state
+            else:
+                log.warning(f"[sync] delete_forum_topic BadRequest，仍清理 state: {e}")
+        except (TimedOut, NetworkError, RetryAfter) as e:
+            log.warning(f"[sync] delete_forum_topic 瞬态错误，下次再试: {e}")
+            deleted_ok = False
+        except Exception as e:
+            log.warning(f"[sync] delete_forum_topic 失败，仍清理 state: {e}")
+        if deleted_ok:
+            await _purge_topic_state(topic_id, path)
+
+    # 再验证 TG 端 topic 是否还存在（用户可能手动删了 topic 但磁盘还在）
+    # 策略：unpinAllForumTopicMessages — 完全静默无副作用，话题不存在时抛 BadRequest
     for topic_id in list(projects.all_bindings().keys()):
         path = projects.get_path(topic_id)
         topic_name = Path(path).name if path else "unknown"
@@ -601,6 +907,12 @@ async def sync_all_projects(bot, chat_id: int):
             log.warning(f"[sync] 话题 {topic_id} 验证未知错误，保留绑定: {e} ({topic_name})")
 
     all_projects = projects.discover()
+
+    # 外脑：为所有项目确保 recon/ 骨架（幂等，绝不覆盖已有文件）
+    for _p in all_projects:
+        if recon.ensure_skeleton(_p["path"]):
+            log.info(f"[recon] 新建外脑骨架: {_p['path']}")
+
     unbound = [p for p in all_projects if not p["bound"] and p.get("mtime", 0) > cutoff]
     if not unbound:
         log.info("[sync] 无新项目需要绑定")
@@ -616,36 +928,49 @@ async def sync_all_projects(bot, chat_id: int):
     except Exception:
         pass
 
-    # 用已绑定的项目名去重
-    bound_names = set()
+    # 用已绑定的项目路径去重（不是名字，同名不同路径的项目都应该被绑定）
+    bound_paths = set()
+    bound_names = {}  # name → count，用于检测同名项目
     for tid, path in projects.all_bindings().items():
-        bound_names.add(Path(path).name)
+        bound_paths.add(path)
+        name = Path(path).name
+        bound_names[name] = bound_names.get(name, 0) + 1
 
-    log.info(f"[sync] 发现 {len(unbound)} 个未绑定项目，已绑定名: {bound_names}")
+    log.info(f"[sync] 发现 {len(unbound)} 个未绑定项目，已绑定路径数: {len(bound_paths)}")
     for p in unbound:
-        if p["name"] in bound_names:
-            log.info(f"[sync] 跳过 {p['name']}（同名话题已存在）")
+        if p["path"] in bound_paths:
+            log.info(f"[sync] 跳过 {p['name']}（路径已绑定）")
             continue
+        # 同名项目用父目录区分话题名
+        topic_name = p["name"]
+        name_count = bound_names.get(topic_name, 0)
+        # 检查未绑定列表中是否还有同名项目
+        same_name_unbound = [x for x in unbound if x["name"] == topic_name and x["path"] != p["path"]]
+        if name_count > 0 or same_name_unbound:
+            parent = Path(p["path"]).parent.name
+            topic_name = f"{p['name']} ({parent})"
         try:
-            topic = await bot.create_forum_topic(chat_id=chat_id, name=p["name"])
+            topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
             projects.bind(topic.message_thread_id, p["path"])
             state.set_cwd(topic.message_thread_id, p["path"])
             # 发送欢迎消息 + 历史会话列表
-            await _send_topic_welcome(bot, chat_id, topic.message_thread_id, p["name"], p["path"])
-            bound_names.add(p["name"])
-            log.info(f"[sync] {p['name']} → topic {topic.message_thread_id}")
+            await _send_topic_welcome(bot, chat_id, topic.message_thread_id, topic_name, p["path"])
+            bound_names[p["name"]] = name_count + 1
+            bound_paths.add(p["path"])
+            log.info(f"[sync] {topic_name} → topic {topic.message_thread_id}")
             # 间隔避免 flood control
             await asyncio.sleep(2)
         except RetryAfter as e:
-            log.warning(f"[sync] {p['name']} 限频，等待 {e.retry_after}s")
+            log.warning(f"[sync] {topic_name} 限频，等待 {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
             # 重试一次
             try:
-                topic = await bot.create_forum_topic(chat_id=chat_id, name=p["name"])
+                topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
                 projects.bind(topic.message_thread_id, p["path"])
                 state.set_cwd(topic.message_thread_id, p["path"])
-                await _send_topic_welcome(bot, chat_id, topic.message_thread_id, p["name"], p["path"])
-                bound_names.add(p["name"])
+                await _send_topic_welcome(bot, chat_id, topic.message_thread_id, topic_name, p["path"])
+                bound_names[p["name"]] = name_count + 1
+                bound_paths.add(p["path"])
                 log.info(f"[sync] {p['name']} → topic {topic.message_thread_id} (重试成功)")
             except Exception as e2:
                 log.warning(f"[sync] {p['name']} 重试也失败: {e2}")
@@ -654,25 +979,56 @@ async def sync_all_projects(bot, chat_id: int):
 
 
 def create_app() -> Application:
-    app = Application.builder().token(BOT_TOKEN).build()
+    # 网络健壮化：
+    # 1. 显式 timeout 让单次请求不会无限挂
+    # 2. 禁用 httpx keepalive 池 → 每次请求新建 TCP，避免"死连接被无限复用"导致 getUpdates 假死
+    # getUpdates 是 long-poll，用独立 client（跟普通 sendMessage 隔离，互不踩连接池）
+    import httpx
+    from telegram.request import HTTPXRequest
+
+    _no_keepalive = {"limits": httpx.Limits(max_keepalive_connections=0, max_connections=10)}
+
+    updates_req = HTTPXRequest(
+        read_timeout=60, connect_timeout=15, pool_timeout=10,
+        httpx_kwargs=_no_keepalive,
+    )
+    default_req = HTTPXRequest(
+        read_timeout=30, connect_timeout=15, pool_timeout=10,
+        httpx_kwargs=_no_keepalive,
+    )
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .request(default_req)
+        .get_updates_request(updates_req)
+        .build()
+    )
 
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
             BotCommand("status", "活跃会话"),
+            BotCommand("trust", "项目信任开关"),
             BotCommand("whoami", "你的 ID"),
         ])
         # 如果已有 CHAT_ID，启动时同步 + 定时同步
         if config.CHAT_ID:
             await sync_all_projects(application.bot, config.CHAT_ID)
+            # sync 完成后再 recover，确保新绑定的项目也能恢复终端会话
+            from src.api_server import _recover_active_sessions
+            await _recover_active_sessions()
 
-        # 每 5 分钟扫描新项目
+        # 每 5 分钟扫描新项目 + recover
         async def periodic_sync():
             while True:
                 await asyncio.sleep(300)
                 if config.CHAT_ID:
                     await sync_all_projects(application.bot, config.CHAT_ID)
+                    from src.api_server import _recover_active_sessions
+                    await _recover_active_sessions()
 
         asyncio.create_task(periodic_sync())
     app.post_init = post_init
@@ -681,6 +1037,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     # 文本消息
     app.add_handler(

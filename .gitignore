@@ -8,6 +8,7 @@ __pycache__/
 .state.json
 .projects.json
 .bindings.json
+*.bak
 
 # Logs
 logs/*.log

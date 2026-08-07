@@ -20,6 +20,8 @@ class Session:
     """一个长驻 Claude 会话"""
     key: int
     cwd: str
+    chat_id: int | None = None
+    thread_id: int | None = None
     proc: asyncio.subprocess.Process | None = None
     session_id: str | None = None
     ready: bool = False
@@ -49,7 +51,11 @@ async def spawn_claude(session: Session, resume_id: str | None = None) -> None:
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
     env.pop("TMUX_PANE", None)              # 防止 hook 误认为终端会话
-    env["CODE_ANYWHERE_SKIP"] = "1"         # Bot 发起的 Claude 不触发 code-anywhere hook
+    # 让 permission hook 识别为 Bot 会话 → 推 TG 审批按钮
+    if session.chat_id:
+        env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
+    if session.thread_id:
+        env["TELEGRAM_THREAD_ID"] = str(session.thread_id)
 
     log.info(f"[spawn] key={session.key} cwd={session.cwd} resume={resume_id or 'new'}")
 
@@ -107,7 +113,13 @@ async def send_message(session: Session, text: str) -> None:
     session.last_active = time.time()
 
 
-async def get_or_create_session(key: int, cwd: str, first_message: str | None = None) -> Session:
+async def get_or_create_session(
+    key: int,
+    cwd: str,
+    first_message: str | None = None,
+    chat_id: int | None = None,
+    thread_id: int | None = None,
+) -> Session:
     """获取已有长连接或创建新的"""
     session = active_sessions.get(key)
 
@@ -119,7 +131,7 @@ async def get_or_create_session(key: int, cwd: str, first_message: str | None = 
     if session and session.ready:
         return session
 
-    session = Session(key=key, cwd=cwd)
+    session = Session(key=key, cwd=cwd, chat_id=chat_id, thread_id=thread_id)
     active_sessions[key] = session
 
     # 检查是否有手动指定的 session（/sessions 切换或 __new__ 强制新建）
