@@ -4,9 +4,17 @@
 
 ## 📍 当前位置
 
-**分支**：`阶段 6 项目外脑机制` 状态 🟢（2026-08-07）
+**分支**：`阶段 7 TG 菜单交互支持` 状态 🟡（2026-08-27，阶段1 开工）
+
+Claude Code 的 AskUserQuestion 选项菜单在 TG 端看不到、无法操作 → 纯手机场景弹菜单即卡死（remote-xray、YARD 均中招，靠 PC tmux 手动点过去兜底）。**已验证致命点**：菜单等待时 `tool_use(AskUserQuestion)` 已结构化写入 transcript（questions/options 全在，无需截屏）。**按键机制**（实测+确认）：单选=`Down×idx`+`Enter`（多问表单自动前进）；多选=`Down×idx`+`Space`勾选+末`Enter`。阶段1 范围=单问题单选：watcher 检测 → TG inline keyboard → 点选注入。方案见决策日志 08-27。
+
+---
+
+**上一分支**：`阶段 6 项目外脑机制` 状态 🟢（2026-08-07）
 
 每个 topic 自动外脑已上线并生产验证（用户反馈"流畅"）：`src/recon.py` + sync 自动建骨架 + SessionStart 注入「当前位置」+wiki 索引（递进式 ≤2KB + 体量哨兵）+ 防 PROGRESS 膨胀 + 附件清理。同批修复 👤 污染（human 白名单）、多行注入（bracketed paste）。详见决策日志 08-07 三行。
+
+⚠️ 2026-08-13：topic 1587（code-anywhere 自身）曾因 `@ca_project` 标签被污染成 `/var/folders/.../tmp.*` 而完全无反应，已手动改回标签修复；**防护未做**（hook 打标签不校验路径、单 topic 哑掉无告警），详见决策日志 08-13。
 
 无阻塞。可选遗留：runner-coach 移植 polling 修复(4.2 ⚪)；多行注入待真实 claude REPL 实测；5.2 僵尸 topic 待裁决；4.4 watcher sid 漂移未启。
 
@@ -232,6 +240,8 @@ log.exception("safe msg", exc_info=exc)                 → 安全（traceback �
 
 | 日期 | 决策 | 背景 | 影响 |
 |---|---|---|---|
+| 2026-08-13 | `@ca_project` 标签被污染成临时目录 → topic 1587 完全无反应（已手动修复，防护待做） | 用户报「TG 的 code-anywhere topic 没反应」。pane `code-anywhere:1.1` 里 claude 真实 cwd 正是 `~/workspace/github/code-anywhere`（`lsof -d cwd` 实证），但 `@ca_project` 标签写成了 `/var/folders/.../T/tmp.sdq5NB1Io1`。`_find_pane_for_project` 按标签匹配 → 找不到 pane → 消息投不进去。bot 轮询/收发全程正常（getUpdates 每 15s、其它 topic 照常），所以从外部看像「bot 挂了」，实际只有这一个 topic 哑掉 | 已 `tmux set-option -p -t code-anywhere:1.1 @ca_project <正确目录>` 修复，`_find_pane_for_project` 复验命中 `%30`，无需重启。**遗留**：① 标签为何被写成 tmp 目录未查明（疑似某次 claude 在临时目录启动，SessionStart hook 按当时 cwd 打标签后覆盖）② hook 打标签时应校验目录（存在 / 非 `/var/folders` 临时路径 / 是 git 仓库），或改用进程真实 cwd 兜底 ③ 这类「单 topic 哑掉」目前无任何告警，只能靠用户发现 —— 与 runner-coach 同类的静默失效 |
+| 2026-08-13 | 移植 runner-coach 的 TG DC 故障转移传输层 | code-anywhere 收不到消息、新项目建不出 topic；我先误判为「网络全局阻断需代理」，用户以「同机 runner-coach 却正常」反驳并证伪 | 根因＝系统 DNS 把 api.telegram.org 解析到失效 IP（本机实测 .167.220 通 / .166.110 时通时不通 / .167.99 .175.50 不通）。新增 `src/tg_transport.py`（移植自 runner-coach `bot/tg_transport.py`，2026-08-11 同款事故），`create_app` 改用 `build_request`。重启后日志实证「出口切换: 系统DNS → 149.154.167.220」、getUpdates 恢复、积压 topic 补建 |
 | 2026-08-07 | 落地「外脑」机制（recon 自动骨架 + SessionStart 注入 + 防膨胀 + 附件清理） | 用户要求：每 topic 自动外脑、防 compact 失忆、控 session 上下文、防 PROGRESS 膨胀（曾发生） | 新增 `src/recon.py`；sync 时为所有项目建骨架+项目 CLAUDE.md（不覆盖已有）；`session_start.py` 注入「当前位置」+wiki 索引（递进式、陈述句、≤2KB、体量哨兵）；`.attachments` 保留最近 20。PreCompact 不能注入上下文→靠 SessionStart 在 compact 后重注入闭环 |
 | 2026-08-07 | 修 👤 污染：只 echo `origin.kind=='human'` 的真人消息 | ephemeral→永久后，compact 摘要/harness 注入/interrupted 等非真人 user 条目被永久刷屏 | `api_server.py` watcher 文本 echo 加 human 白名单；真实数据验证 8 真人保留、10 污染拦掉 |
 | 2026-08-07 | 多行注入改 bracketed paste | `send-keys -l` 遇内嵌换行逐行提交→多行脚本散架（老坑，单行无碍） | `_inject_tmux` 多行走 `set-buffer`+`paste-buffer -p`，单行不变；待真实 claude REPL 实测 bracketed paste 生效 |

@@ -269,6 +269,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
 
+    # AskUserQuestion 菜单选择 → 注入按键到 pane
+    if data.startswith("m:"):
+        try:
+            _, token, oi = data.split(":", 2)
+            oi = int(oi)
+        except (ValueError, IndexError):
+            return
+        from src.api_server import handle_menu_callback
+        idx = await handle_menu_callback(token, oi)
+        try:
+            if idx is not None:
+                await query.edit_message_text(f"✅ 已选择第 {idx + 1} 项")
+            else:
+                await query.edit_message_text("⚠️ 此菜单已失效（可能已在其它端选过）")
+        except Exception:
+            pass
+        return
+
 
 # ============ 消息处理 ============
 
@@ -982,17 +1000,18 @@ def create_app() -> Application:
     # 网络健壮化：
     # 1. 显式 timeout 让单次请求不会无限挂
     # 2. 禁用 httpx keepalive 池 → 每次请求新建 TCP，避免"死连接被无限复用"导致 getUpdates 假死
+    # 3. DC 故障转移 → 系统 DNS 解析到失效 Telegram IP 时自动换 IP 直连（见 src/tg_transport.py）
     # getUpdates 是 long-poll，用独立 client（跟普通 sendMessage 隔离，互不踩连接池）
     import httpx
-    from telegram.request import HTTPXRequest
+    from src.tg_transport import build_request
 
     _no_keepalive = {"limits": httpx.Limits(max_keepalive_connections=0, max_connections=10)}
 
-    updates_req = HTTPXRequest(
+    updates_req = build_request(
         read_timeout=60, connect_timeout=15, pool_timeout=10,
         httpx_kwargs=_no_keepalive,
     )
-    default_req = HTTPXRequest(
+    default_req = build_request(
         read_timeout=30, connect_timeout=15, pool_timeout=10,
         httpx_kwargs=_no_keepalive,
     )

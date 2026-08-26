@@ -79,6 +79,89 @@ def _consume_tg_reply(topic_id: int) -> int | None:
     return _pending_tg_reply.pop(topic_id, None)
 
 
+# ============ AskUserQuestion 菜单 → TG inline keyboard ============
+# 阶段1：只处理「单问题 + 单选」。多问表单 / 多选留阶段2（退化为原工具展示）。
+# 关键事实：菜单等待时 tool_use(AskUserQuestion) 已结构化写入 transcript，watcher 直接可读。
+_pending_menus: dict[str, dict] = {}  # token → {topic_id, chat_id, pane, n_options}
+
+
+def _menu_token(tool_use_id: str) -> str:
+    return (tool_use_id or uuid.uuid4().hex)[:12]
+
+
+async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
+                      tool_use_id: str, tinput: dict) -> bool:
+    """AskUserQuestion → TG inline keyboard。返回 True=已接管（阶段1 支持的形态）。"""
+    import html as _html
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    questions = tinput.get("questions") or []
+    if len(questions) != 1:
+        return False  # 多问题表单 → 阶段2
+    q = questions[0]
+    if q.get("multiSelect"):
+        return False  # 多选 → 阶段2
+    options = q.get("options") or []
+    if not options:
+        return False
+
+    sess = terminal_sessions.get(session_id) or {}
+    pane = sess.get("tmux_pane")
+    if not pane or not _bot:
+        return False
+
+    token = _menu_token(tool_use_id)
+    _pending_menus[token] = {
+        "topic_id": topic_id, "chat_id": chat_id,
+        "pane": pane, "n_options": len(options),
+    }
+    rows = [[InlineKeyboardButton(f"{i+1}. {(o.get('label') or '?')}"[:60],
+                                  callback_data=f"m:{token}:{i}")]
+            for i, o in enumerate(options)]
+    header = _html.escape(q.get("header") or "请选择")
+    qtext = _html.escape(q.get("question") or "")
+    try:
+        from src.bot import stop_typing
+        stop_typing(topic_id)
+    except Exception:
+        pass
+    await _bot.send_message(
+        chat_id=chat_id, message_thread_id=topic_id,
+        text=f"❓ <b>{header}</b>\n{qtext}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    log.info(f"[menu] offered token={token} topic={topic_id} options={len(options)}")
+    return True
+
+
+async def _inject_keys(pane: str, keys: list[str]):
+    """用 tmux send-keys 发送具名按键（Down/Up/Enter/Space...）到 pane。"""
+    if not keys:
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "send-keys", "-t", pane, *keys,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.wait()
+
+
+async def handle_menu_callback(token: str, option_idx: int) -> int | None:
+    """TG 菜单按钮 → 注入 Down×idx + Enter 到 pane。返回选中项序号(0 基)或 None(已失效)。"""
+    m = _pending_menus.pop(token, None)
+    if not m:
+        return None
+    pane = m["pane"]
+    idx = max(0, min(option_idx, m["n_options"] - 1))
+    # 光标默认在第 0 项：先下移 idx 次，短暂停顿让 TUI 跟上，再回车（多问表单会自动前进）
+    if idx > 0:
+        await _inject_keys(pane, ["Down"] * idx)
+        await asyncio.sleep(0.15)
+    await _inject_keys(pane, ["Enter"])
+    log.info(f"[menu] selected token={token} idx={idx} pane={pane}")
+    return idx
+
+
 # ── Web client bus ───────────────────────────────────────────────────────────
 # SSE 订阅者池：session_id → [asyncio.Queue, ...]
 # 每个 web 客户端订阅时挂一个 Queue；watcher 解析 JSONL 后 fan-out 给所有 queue。
@@ -497,6 +580,13 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 tname = block.get("name", "?")
                                 tinput = block.get("input", {}) or {}
                                 tid = block.get("id", "")
+                                # AskUserQuestion → 转 TG inline keyboard（阶段1: 单问单选）
+                                if tname == "AskUserQuestion":
+                                    try:
+                                        if await _offer_menu(chat_id, topic_id, session_id, tid, tinput):
+                                            continue  # 已接管，不再走原工具展示
+                                    except Exception as e:
+                                        log.warning(f"[menu] offer 失败: {e}")
                                 # 白名单：抓原图路径供 tool_result 阶段读取真图
                                 cand: str | None = None
                                 if tname == "mcp__Playwright__browser_take_screenshot":
