@@ -269,20 +269,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
 
-    # AskUserQuestion 菜单选择 → 注入按键到 pane
-    if data.startswith("m:"):
+    # AskUserQuestion 菜单：多页表单每问的标题占位行，点了忽略
+    if data == "mnop":
+        return
+
+    # AskUserQuestion 菜单：选项点击（单选即提交 / 多选、多页累积后刷新键盘）
+    if data.startswith("ms:"):
         try:
-            _, token, oi = data.split(":", 2)
-            oi = int(oi)
+            _, token, qi, oi = data.split(":", 3)
+            qi, oi = int(qi), int(oi)
         except (ValueError, IndexError):
             return
-        from src.api_server import handle_menu_callback
-        idx = await handle_menu_callback(token, oi)
+        from src.api_server import handle_menu_select, menu_keyboard_for
+        r = await handle_menu_select(token, qi, oi)
         try:
-            if idx is not None:
-                await query.edit_message_text(f"✅ 已选择第 {idx + 1} 项")
+            if r == "submitted":
+                await query.edit_message_text("✅ 已提交")
+            elif r == "updated":
+                kb = menu_keyboard_for(token)
+                if kb:
+                    await query.edit_message_reply_markup(reply_markup=kb)
             else:
                 await query.edit_message_text("⚠️ 此菜单已失效（可能已在其它端选过）")
+        except Exception:
+            pass
+        return
+
+    # AskUserQuestion 菜单：提交累积的选择
+    if data.startswith("mok:"):
+        token = data[4:]
+        from src.api_server import handle_menu_submit
+        r = await handle_menu_submit(token)
+        try:
+            await query.edit_message_text("✅ 已提交" if r else "⚠️ 此菜单已失效")
         except Exception:
             pass
         return

@@ -80,63 +80,113 @@ def _consume_tg_reply(topic_id: int) -> int | None:
 
 
 # ============ AskUserQuestion 菜单 → TG inline keyboard ============
-# 阶段1：只处理「单问题 + 单选」。多问表单 / 多选留阶段2（退化为原工具展示）。
+# 三形态：单问单选（点即提交）/ 单问多选 / 多页表单（累积各页选择后一次提交）。
+# 按键机制（sandbox 实测）：单选项 Down×idx+Enter（选中且自动前进到下一页/Submit）；
+# 多选项 Down 定位 + Space toggle；Tab 切下一页签；Submit 页 Enter 提交。每页光标初始在第0项。
 # 关键事实：菜单等待时 tool_use(AskUserQuestion) 已结构化写入 transcript，watcher 直接可读。
-_pending_menus: dict[str, dict] = {}  # token → {topic_id, chat_id, pane, n_options}
+_pending_menus: dict[str, dict] = {}
+# token → {topic_id, chat_id, pane, msg_id,
+#          questions:[{header,question,multiSelect,options:[label,...]}],
+#          selections:{qi: int|None(单选) | set(多选)}}
 
 
 def _menu_token(tool_use_id: str) -> str:
     return (tool_use_id or uuid.uuid4().hex)[:12]
 
 
+def _menu_keyboard(token: str):
+    """按当前 selections 渲染键盘。单问单选无提交键（点即提交），其余带「提交选择」。"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    m = _pending_menus[token]
+    qs = m["questions"]
+    multi_q = len(qs) > 1
+    rows = []
+    for qi, q in enumerate(qs):
+        sel = m["selections"].get(qi)
+        answered = bool(sel) if q["multiSelect"] else (sel is not None)
+        if multi_q:  # 多页时用一行标注每问（占位按钮，点了忽略）
+            rows.append([InlineKeyboardButton(
+                f"{'☑' if answered else '▫'} {q['header'] or ('问' + str(qi + 1))}",
+                callback_data="mnop")])
+        for oi, label in enumerate(q["options"]):
+            picked = (oi in sel) if q["multiSelect"] else (sel == oi)
+            rows.append([InlineKeyboardButton(
+                f"{'✅ ' if picked else ''}{label}"[:60],
+                callback_data=f"ms:{token}:{qi}:{oi}")])
+    single_radio = len(qs) == 1 and not qs[0]["multiSelect"]
+    if not single_radio:
+        rows.append([InlineKeyboardButton("✅ 提交选择", callback_data=f"mok:{token}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def menu_keyboard_for(token: str):
+    """给 bot callback 刷新键盘用；token 失效返回 None。"""
+    return _menu_keyboard(token) if token in _pending_menus else None
+
+
 async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
                       tool_use_id: str, tinput: dict) -> bool:
-    """AskUserQuestion → TG inline keyboard。返回 True=已接管（阶段1 支持的形态）。"""
+    """AskUserQuestion → TG inline keyboard。返回 True=已接管。"""
     import html as _html
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     questions = tinput.get("questions") or []
-    if len(questions) != 1:
-        return False  # 多问题表单 → 阶段2
-    q = questions[0]
-    if q.get("multiSelect"):
-        return False  # 多选 → 阶段2
-    options = q.get("options") or []
-    if not options:
+    if not questions:
         return False
-
     sess = terminal_sessions.get(session_id) or {}
     pane = sess.get("tmux_pane")
     if not pane or not _bot:
         return False
 
+    qs = []
+    for q in questions:
+        opts = [(o.get("label") or "?") for o in (q.get("options") or [])]
+        if not opts:
+            return False
+        qs.append({
+            "header": q.get("header") or "",
+            "question": q.get("question") or "",
+            "multiSelect": bool(q.get("multiSelect")),
+            "options": opts,
+        })
+
     token = _menu_token(tool_use_id)
     _pending_menus[token] = {
-        "topic_id": topic_id, "chat_id": chat_id,
-        "pane": pane, "n_options": len(options),
+        "topic_id": topic_id, "chat_id": chat_id, "pane": pane, "msg_id": None,
+        "questions": qs,
+        "selections": {qi: (set() if q["multiSelect"] else None) for qi, q in enumerate(qs)},
     }
-    rows = [[InlineKeyboardButton(f"{i+1}. {(o.get('label') or '?')}"[:60],
-                                  callback_data=f"m:{token}:{i}")]
-            for i, o in enumerate(options)]
-    header = _html.escape(q.get("header") or "请选择")
-    qtext = _html.escape(q.get("question") or "")
+
+    if len(qs) == 1:
+        q = qs[0]
+        tail = "（可多选，选完点提交）" if q["multiSelect"] else ""
+        body = f"❓ <b>{_html.escape(q['header'] or '请选择')}</b>{tail}\n{_html.escape(q['question'])}"
+    else:
+        lines = [f"❓ <b>请依次作答（{len(qs)} 问），选完点「提交选择」</b>"]
+        for qi, q in enumerate(qs):
+            mark = "（多选）" if q["multiSelect"] else ""
+            lines.append(f"{qi + 1}. {_html.escape(q['question'] or q['header'])}{mark}")
+        body = "\n".join(lines)
+
     try:
         from src.bot import stop_typing
         stop_typing(topic_id)
     except Exception:
         pass
-    await _bot.send_message(
+    msg = await _bot.send_message(
         chat_id=chat_id, message_thread_id=topic_id,
-        text=f"❓ <b>{header}</b>\n{qtext}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(rows),
+        text=body, parse_mode="HTML",
+        reply_markup=_menu_keyboard(token),
     )
-    log.info(f"[menu] offered token={token} topic={topic_id} options={len(options)}")
+    try:
+        _pending_menus[token]["msg_id"] = msg.message_id
+    except Exception:
+        pass
+    log.info(f"[menu] offered token={token} topic={topic_id} questions={len(qs)}")
     return True
 
 
 async def _inject_keys(pane: str, keys: list[str]):
-    """用 tmux send-keys 发送具名按键（Down/Up/Enter/Space...）到 pane。"""
+    """一次性 tmux send-keys 多个具名按键。"""
     if not keys:
         return
     proc = await asyncio.create_subprocess_exec(
@@ -146,20 +196,74 @@ async def _inject_keys(pane: str, keys: list[str]):
     await proc.wait()
 
 
-async def handle_menu_callback(token: str, option_idx: int) -> int | None:
-    """TG 菜单按钮 → 注入 Down×idx + Enter 到 pane。返回选中项序号(0 基)或 None(已失效)。"""
+async def _inject_key_seq(pane: str, keys: list[str]):
+    """逐键注入：Enter/Tab 会切页/提交，其后留停顿让 TUI 跟上，避免漏键。"""
+    for k in keys:
+        await _inject_keys(pane, [k])
+        await asyncio.sleep(0.25 if k in ("Enter", "Tab") else 0.04)
+
+
+def _build_keys(m: dict) -> list[str]:
+    """据 selections 生成完整按键序列（见顶部机制注释）。"""
+    qs = m["questions"]
+    keys: list[str] = []
+    for qi, q in enumerate(qs):
+        sel = m["selections"].get(qi)
+        if not q["multiSelect"]:
+            idx = sel if isinstance(sel, int) else 0
+            keys += ["Down"] * idx + ["Enter"]  # 选中 + 自动前进（末页则到 Submit）
+        else:
+            prev = 0
+            for idx in sorted(sel or []):
+                keys += ["Down"] * (idx - prev) + ["Space"]
+                prev = idx
+            keys += ["Tab"]  # 前进到下一页签
+    single_radio = len(qs) == 1 and not qs[0]["multiSelect"]
+    if not single_radio:
+        keys += ["Enter"]  # Submit 页提交
+    return keys
+
+
+async def _submit_menu(token: str) -> bool:
     m = _pending_menus.pop(token, None)
     if not m:
+        return False
+    keys = _build_keys(m)
+    await _inject_key_seq(m["pane"], keys)
+    log.info(f"[menu] submitted token={token} keys={keys}")
+    return True
+
+
+async def handle_menu_select(token: str, qi: int, oi: int) -> str | None:
+    """点某问某项。更新 selections；单问单选→即提交('submitted')；否则返回'updated'刷新键盘。"""
+    m = _pending_menus.get(token)
+    if not m:
         return None
-    pane = m["pane"]
-    idx = max(0, min(option_idx, m["n_options"] - 1))
-    # 光标默认在第 0 项：先下移 idx 次，短暂停顿让 TUI 跟上，再回车（多问表单会自动前进）
-    if idx > 0:
-        await _inject_keys(pane, ["Down"] * idx)
-        await asyncio.sleep(0.15)
-    await _inject_keys(pane, ["Enter"])
-    log.info(f"[menu] selected token={token} idx={idx} pane={pane}")
-    return idx
+    if qi >= len(m["questions"]):
+        return "updated"
+    q = m["questions"][qi]
+    if oi >= len(q["options"]):
+        return "updated"
+    if q["multiSelect"]:
+        s = m["selections"][qi]
+        if not isinstance(s, set):
+            s = set()
+            m["selections"][qi] = s
+        s.discard(oi) if oi in s else s.add(oi)
+    else:
+        m["selections"][qi] = oi
+    if len(m["questions"]) == 1 and not q["multiSelect"]:
+        await _submit_menu(token)
+        return "submitted"
+    return "updated"
+
+
+async def handle_menu_submit(token: str) -> str | None:
+    """点「提交选择」。"""
+    if token not in _pending_menus:
+        return None
+    await _submit_menu(token)
+    return "submitted"
 
 
 # ── Web client bus ───────────────────────────────────────────────────────────

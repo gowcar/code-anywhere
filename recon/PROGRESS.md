@@ -4,9 +4,11 @@
 
 ## 📍 当前位置
 
-**分支**：`阶段 7 TG 菜单交互支持` 状态 🟡（2026-08-27，阶段1 开工）
+**分支**：`阶段 7 TG 菜单交互支持` 状态 🟢（2026-08-27，阶段1+2 已上线并 sandbox 真机验证）
 
-Claude Code 的 AskUserQuestion 选项菜单在 TG 端看不到、无法操作 → 纯手机场景弹菜单即卡死（remote-xray、YARD 均中招，靠 PC tmux 手动点过去兜底）。**已验证致命点**：菜单等待时 `tool_use(AskUserQuestion)` 已结构化写入 transcript（questions/options 全在，无需截屏）。**按键机制**（实测+确认）：单选=`Down×idx`+`Enter`（多问表单自动前进）；多选=`Down×idx`+`Space`勾选+末`Enter`。阶段1 范围=单问题单选：watcher 检测 → TG inline keyboard → 点选注入。方案见决策日志 08-27。
+Claude Code 的 AskUserQuestion 菜单在 TG 端看不到→纯手机弹菜单即卡死（remote-xray/YARD 中招）。已打通 TG inline keyboard：watcher 检测 `tool_use(AskUserQuestion)`（等待时已结构化写入 transcript）→ 发按钮 → 注入按键。**三形态全部上线**：单问单选（点即提交）/ 单问多选（按钮累积✓+提交）/ 多页表单（逐问选+一次提交）。按键机制（实测）：单选项 `Down×idx`+`Enter`（选中且自动前进到下一页/Submit）；多选项 `Space` toggle + `Tab` 切页 + Submit 页 `Enter` 提交；每页光标初始第0项。序列生成 = `src/api_server.py:_build_keys`。真机验证：sandbox 造单选/多选/多页菜单，检测→发按钮→注入选中全部通过。
+
+待阶段3：`Type something` 文本回退 + 原生菜单（plan accept/reject、`/`命令菜单，不写 transcript 需 capture-pane 截屏）。
 
 ---
 
