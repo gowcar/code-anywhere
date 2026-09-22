@@ -1,11 +1,13 @@
 """项目发现 & Topic 绑定
 
-项目来源：~/.claude/projects/（Claude 自动管理）
+项目来源：~/.claude/projects/（Claude 自动管理）+ ~/.codex/sessions/（Codex rollout）
+两边按项目路径合并——只用过 Codex、从没跑过 Claude 的目录同样算项目
 我们只维护：topic_id ↔ 项目路径 的绑定关系
 """
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -76,6 +78,43 @@ def all_bindings() -> dict[int, str]:
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 
+def codex_sessions_dir() -> Path:
+    """Codex rollout 根目录（尊重 CODEX_HOME，运行时读取以便测试覆盖）"""
+    return Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+
+
+# rollout 首行是 session_meta，cwd 排在超长的 base_instructions 之前，
+# 读前 8KB 足够拿到；整行可能几十 KB，全读没必要。
+_CWD_RE = re.compile(r'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_CODEX_HEAD_BYTES = 8192
+
+
+def discover_codex() -> dict[str, tuple[int, float]]:
+    """扫 Codex rollout，返回 {项目路径: (会话数, 最新 mtime)}"""
+    base = codex_sessions_dir()
+    if not base.is_dir():
+        return {}
+    found: dict[str, tuple[int, float]] = {}
+    for f in base.rglob("*.jsonl"):
+        try:
+            with f.open("r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_CODEX_HEAD_BYTES)
+            m = _CWD_RE.search(head)
+            if not m:
+                continue
+            cwd = json.loads(f'"{m.group(1)}"')
+            if not cwd or not Path(cwd).is_dir():
+                continue
+            cwd = str(Path(cwd).resolve())
+            mtime = f.stat().st_mtime
+            count, prev = found.get(cwd, (0, 0.0))
+            found[cwd] = (count + 1, max(prev, mtime))
+        except Exception as e:
+            log.debug(f"[codex] 跳过 {f.name}: {e}")
+            continue
+    return found
+
+
 def _match_child(parent: Path, seg: str) -> Path | None:
     """在 parent 下找名字匹配 seg 的条目。seg 里的 - 可能是原路径的 - _ 或 . """
     literal = parent / seg
@@ -130,27 +169,63 @@ def claude_dir(project_dir: str) -> Path | None:
     return None
 
 
-def discover() -> list[dict]:
-    """从 ~/.claude/projects/ 发现所有 Claude 项目"""
-    claude_projects = CLAUDE_PROJECTS
-    if not claude_projects.is_dir():
-        return []
+_TMP_ROOTS = ("/tmp", "/var/tmp")
 
+
+def _is_ignored(path: str) -> bool:
+    """home 本身和临时目录只是"跑过 CLI 的地方"，不是项目——否则每个 topic 列表都会被它们刷屏
+
+    额外排除项写进 PROJECT_ROOT/.projectignore，一行一个绝对路径（# 开头为注释）。
+    """
+    p = Path(path)
+    if p == Path.home():
+        return True
+    for tmp in _TMP_ROOTS:
+        tmp_path = Path(tmp)
+        if p == tmp_path or p.is_relative_to(tmp_path):
+            return True
+    ignore_file = PROJECT_ROOT / ".projectignore"
+    if ignore_file.exists():
+        try:
+            for line in ignore_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if p == Path(line) or p.is_relative_to(Path(line)):
+                    return True
+        except Exception as e:
+            log.warning(f"[projectignore] 读取失败: {e}")
+    return False
+
+
+def discover() -> list[dict]:
+    """发现所有项目 = Claude（~/.claude/projects/）∪ Codex（~/.codex/sessions/）
+
+    同一路径两边都有时合并：会话数相加，mtime 取较新。
+    """
+    claude_projects = CLAUDE_PROJECTS
     _reverse_path = reverse_path
     bound_paths = set(_bindings.values())
-    all_paths = []
+    merged: dict[str, tuple[int, float]] = {}
 
-    for d in sorted(claude_projects.iterdir()):
-        if not d.is_dir():
-            continue
-        real_path = _reverse_path(d.name)
-        if not Path(real_path).is_dir():
-            continue
-        sessions = list(d.glob("*.jsonl"))
-        if not sessions:
-            continue
-        latest_mtime = max(s.stat().st_mtime for s in sessions)
-        all_paths.append((real_path, len(sessions), latest_mtime))
+    if claude_projects.is_dir():
+        for d in sorted(claude_projects.iterdir()):
+            if not d.is_dir():
+                continue
+            real_path = _reverse_path(d.name)
+            if not Path(real_path).is_dir():
+                continue
+            sessions = list(d.glob("*.jsonl"))
+            if not sessions:
+                continue
+            latest_mtime = max(s.stat().st_mtime for s in sessions)
+            merged[str(Path(real_path).resolve())] = (len(sessions), latest_mtime)
+
+    for cwd, (count, mtime) in discover_codex().items():
+        prev_count, prev_mtime = merged.get(cwd, (0, 0.0))
+        merged[cwd] = (prev_count + count, max(prev_mtime, mtime))
+
+    all_paths = [(p, c, m) for p, (c, m) in merged.items() if not _is_ignored(p)]
 
     def _repo_root(p: str) -> str | None:
         """向上找 .git，返回所属仓库根；不在任何仓库内则 None"""
