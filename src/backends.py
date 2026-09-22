@@ -1,0 +1,178 @@
+"""Project backend preferences and Codex's terminal/transcript boundary.
+
+Claude and Codex keep separate native histories. Only the selected backend is
+allowed to receive input or publish events for a project.
+"""
+
+import asyncio
+import json
+import os
+import tomllib
+from pathlib import Path
+
+from src.config import PROJECT_ROOT
+
+PREFERENCES_FILE = PROJECT_ROOT / ".backends.json"
+SESSIONS_FILE = PROJECT_ROOT / ".codex-sessions.json"
+
+
+def remember_codex(cwd: str, sid: str) -> None:
+    data = json.loads(SESSIONS_FILE.read_text()) if SESSIONS_FILE.exists() else {}
+    key = str(Path(cwd).resolve())
+    if data.get(key) == sid:
+        return
+    data[key] = sid
+    temp = SESSIONS_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, indent=2) + "\n")
+    temp.replace(SESSIONS_FILE)
+
+
+def codex_env_keys() -> list[str]:
+    path = Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+    cfg = tomllib.loads(path.read_text()) if path.exists() else {}
+    provider = cfg.get("model_providers", {}).get(cfg.get("model_provider"), {})
+    return [provider["env_key"]] if provider.get("env_key") else []
+
+
+def get_backend(cwd: str) -> str:
+    if not PREFERENCES_FILE.exists():
+        return "claude"
+    data = json.loads(PREFERENCES_FILE.read_text())
+    value = data.get(str(Path(cwd).resolve()), "claude")
+    if value not in {"claude", "codex"}:
+        raise ValueError(f"Invalid backend for {cwd}: {value}")
+    return value
+
+
+def set_backend(cwd: str, backend: str) -> None:
+    if backend not in {"claude", "codex"}:
+        raise ValueError("backend must be claude or codex")
+    data = json.loads(PREFERENCES_FILE.read_text()) if PREFERENCES_FILE.exists() else {}
+    data[str(Path(cwd).resolve())] = backend
+    temp = PREFERENCES_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    temp.replace(PREFERENCES_FILE)
+
+
+async def command(*args: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode:
+        # Arguments may include gateway credentials: never include argv here.
+        raise RuntimeError(f"{args[0]} failed: {err.decode(errors='replace')[:300]}")
+    return out.decode(errors="replace").strip()
+
+
+async def pane_processes(pane: str, backend: str) -> list[str]:
+    try:
+        tty = await command("tmux", "display-message", "-p", "-t", pane, "#{pane_tty}")
+        if not tty:
+            return []
+        rows = await command("ps", "-t", tty.rsplit("/", 1)[-1], "-o", "pid=,comm=")
+        return [p[0] for row in rows.splitlines()
+                if len(p := row.strip().split(None, 1)) == 2
+                and Path(p[1]).name == backend]
+    except (OSError, RuntimeError, asyncio.TimeoutError):
+        return []
+
+
+async def codex_transcript(pane: str, cwd: str) -> tuple[str, str] | None:
+    """Bind the actual process's open rollout, never guess by project mtime.
+
+This also handles Codex paginated histories: the live rollout still contains
+item_completed events. lsof is present on the supported macOS host.
+"""
+    for pid in await pane_processes(pane, "codex"):
+        try:
+            files = await command("lsof", "-a", "-p", pid, "-Fn")
+            for line in files.splitlines():
+                if not line.startswith("n") or not line.endswith(".jsonl"):
+                    continue
+                path = Path(line[1:])
+                if not path.name.startswith("rollout-"):
+                    continue
+                with path.open() as f:
+                    meta = json.loads(f.readline())
+                payload = meta.get("payload", {})
+                if meta.get("type") != "session_meta" or not payload.get("cwd"):
+                    continue
+                if isinstance(payload.get("source"), dict):
+                    continue  # sub-agent rollouts must not replace the terminal's main thread
+                if Path(payload["cwd"]).resolve() == Path(cwd).resolve():
+                    sid = payload.get("id") or payload.get("session_id")
+                    if sid:
+                        return sid, str(path)
+        except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+            continue
+    return None
+
+
+def codex_launch_args(cwd: str, resume_id: str | None = None, model: str | None = None) -> list[str]:
+    from src.permissions import get_mode, MODES
+    mode = get_mode(cwd)
+    args = [os.getenv("CODEX_BIN", "codex"), "--no-alt-screen",
+            "-a", "never", "-s", MODES[mode],
+            "-c", 'project_doc_fallback_filenames=["CLAUDE.md"]',
+            "-c", "check_for_update_on_startup=false"]
+    if mode == "workspace":
+        args += ["-c", "sandbox_workspace_write.network_access=true"]
+    model = model or os.getenv("CODEX_MODEL")
+    if model:
+        args += ["-m", model]
+    if not resume_id and SESSIONS_FILE.exists():
+        resume_id = json.loads(SESSIONS_FILE.read_text()).get(str(Path(cwd).resolve()))
+    if resume_id:
+        args += ["resume", resume_id]
+    return args
+
+
+def normalize_codex(event: dict) -> dict | None:
+    """Convert public conversation items to the existing TG / web event schema.
+
+Never publish reasoning, instructions, world state, or duplicate response_item
+messages. Current CLI uses item_completed; older rollouts use agent_message.
+"""
+    payload = event.get("payload", {})
+    if event.get("type") == "turn_context":
+        sandbox = (payload.get("sandbox_policy") or {}).get("type")
+        mode = {"danger-full-access": "full", "workspace-write": "workspace", "read-only": "read-only"}.get(sandbox)
+        return {"type": "system", "model": payload.get("model", ""), "permission_mode": mode}
+    if event.get("type") != "event_msg":
+        return None
+    kind = payload.get("type")
+    if kind in {"task_complete", "task_completed", "turn_aborted"}:
+        return {"type": "result", "subtype": kind}
+    if kind == "error":
+        return {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "⚠️ Codex: " + str(payload.get("message", "运行失败"))}]}}
+    item = payload.get("item", {}) if kind == "item_completed" else {}
+    item_type = item.get("type")
+    uid = item.get("id")
+    if item_type in {"UserMessage", "AgentMessage"}:
+        text = "\n".join(c.get("text", "") for c in item.get("content", [])
+                         if c.get("type") in {"text", "Text"})
+        role = "user" if item_type == "UserMessage" else "assistant"
+    elif kind in {"user_message", "agent_message"}:
+        text = payload.get("message", "")
+        role = "user" if kind == "user_message" else "assistant"
+    elif item_type == "CommandExecution":
+        cmd = item.get("command", [])
+        return {"type": "assistant", "uuid": uid, "message": {"content": [
+            {"type": "tool_use", "id": uid, "name": "Bash",
+             "input": {"command": " ".join(cmd) if isinstance(cmd, list) else cmd}}]}}
+    else:
+        return None
+    if not text:
+        return None
+    return {"type": role, "uuid": uid,
+            "origin": {"kind": "human"} if role == "user" else {},
+            "message": {"role": role, "content": text if role == "user" else [
+                {"type": "text", "text": text}]}}

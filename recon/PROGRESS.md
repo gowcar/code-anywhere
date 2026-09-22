@@ -3,15 +3,16 @@
 > 单一真相源。新 session 第一件事就读它。
 
 ## 📍 当前位置
+**yard 会话映射已确认**：TG yard→`alan-llk/yard-codex` `%178`（Codex）；电脑 `yard-supervisor` `%155` 是保留的 Claude，会话不同。新窗口默认落入第一个 tmux session 导致入口混淆；仅诊断，未重绑。详见 `wiki/model-backends.md`。
+**2026-09-15 权限切换 🟢**：`/model codex full` 与 `/permissions full|workspace|read-only` 已上线，项目独立持久化并立即恢复原会话；23 项回归通过。yard 同 pane/sid 切 Full，原生记录 `danger-full-access` / profile disabled；临时目录读写、HTTPS 200、SSH TCP 连接均真机通过。详见 `wiki/model-backends.md`、`logs/permissions-validation.log`。
+**2026-09-14 GPT 切换 🟢**：项目级 `/model codex` / `/model claude` 已上线，runner-coach 当前 GPT（gpt-6-astra）。13 项回归通过；GPT 真机执行 runner-coach 测试 30 passed；关闭 Codex 再 resume 同 sid、Bot 重启恢复、web/SSE 续聊、TG 回传均通过。业务源码无改动。实现/边界/记录：`wiki/model-backends.md`。最终 TG 通知已送达：code-anywhere 48721 / runner-coach 48722。
 
-**分支**：`阶段 7 TG 菜单交互支持` 状态 🟢（2026-08-27，阶段1+2 已上线并 sandbox 真机验证）
+**上一分支**：`阶段 7 TG 菜单交互支持` 状态 🟢（2026-08-27，阶段1+2 已上线并 sandbox 真机验证）
 
 Claude Code 的 AskUserQuestion 菜单在 TG 端看不到→纯手机弹菜单即卡死（remote-xray/YARD 中招）。已打通 TG inline keyboard：watcher 检测 `tool_use(AskUserQuestion)`（等待时已结构化写入 transcript）→ 发按钮 → 注入按键。**三形态全部上线**：单问单选（点即提交）/ 单问多选（按钮累积✓+提交）/ 多页表单（逐问选+一次提交）。按键机制（实测）：单选项 `Down×idx`+`Enter`（选中且自动前进到下一页/Submit）；多选项 `Space` toggle + `Tab` 切页 + Submit 页 `Enter` 提交；每页光标初始第0项。序列生成 = `src/api_server.py:_build_keys`。真机验证：sandbox 造单选/多选/多页菜单，检测→发按钮→注入选中全部通过。
 
 待阶段3：`Type something` 文本回退 + 原生菜单（plan accept/reject、`/`命令菜单，不写 transcript 需 capture-pane 截屏）。
-
 ---
-
 **上一分支**：`阶段 6 项目外脑机制` 状态 🟢（2026-08-07）
 
 每个 topic 自动外脑已上线并生产验证（用户反馈"流畅"）：`src/recon.py` + sync 自动建骨架 + SessionStart 注入「当前位置」+wiki 索引（递进式 ≤2KB + 体量哨兵）+ 防 PROGRESS 膨胀 + 附件清理。同批修复 👤 污染（human 白名单）、多行注入（bracketed paste）。详见决策日志 08-07 三行。
@@ -75,21 +76,9 @@ PC ↔ 手机 ↔ web 3 端一体，完美同步单 session 远控本机 Claude 
 
 **被回滚的改动**：见「📍 当前位置」回滚清单
 
-### 阶段 2.5：Claude → TG 发图通道 🟢（已上线）
+### 阶段 2.5：Claude → TG 发图 🟢
 
-触发场景：runner-coach 截了图想发到 TG 看，但 Claude 自己说"发不了"（Anthropic Messages API output 无 image block）。
-
-落地（`src/api_server.py:_watch_transcript`）：
-- 🟢 watcher 在 assistant.tool_use 阶段按白名单（`mcp__Playwright__browser_take_screenshot`/`Read`/`Write`/`MultiEdit`/`NotebookEdit`）抓 `filename` / `file_path` → 拼成绝对路径存 `tool_use_image_paths[tool_use_id]`
-- 🟢 看到对应 tool_result（任意 inner，含 text 也行）→ 文件存在则 `send_document` 发原图
-- 🟢 退化路径：原图缺失 + tool_result inner 有 image block → `send_photo` 发 base64 缩略图
-- 🟢 去重：`sent_image_tool_ids` 集合，每个 tool_use_id 只发一次
-
-关键坑：
-- TG `send_photo` 强制压缩长边到 ~1280px 并转 JPEG（长图必糊）→ 原图统一走 `send_document`，客户端仍能 inline 预览图片，但字节无损
-- Playwright MCP 的 tool_result 不一定带 image block（行为不稳定）→ 不能依赖 image block 作触发条件，要靠 tool_use 阶段抓 path
-
-效果：runner-coach 让 Claude 截图后 TG 自动出原图，零额外提示词，runner-coach 项目无感知。
+原图优先 `send_document`，工具结果缩略图兜底；详见 `wiki/tg-image-delivery.md`。
 
 ### 阶段 4：Bot 假死根因攻坚 🟡（2026-07-26）
 
@@ -158,55 +147,9 @@ log.exception("safe msg", exc_info=exc)                 → 安全（traceback �
 
 ### 阶段 5：项目发现与 topic 卫生 🟡（2026-07-28）
 
-#### 5.1 路径编解码丢下划线项目 🟢（已修并验证）
+#### 5.1 路径编解码 🟢
 
-**同一个假设（`cwd.replace("/", "-")` 漏掉 `_` 和 `.`）散落 6 处，造成四个叠加症状**：
-
-1. `_reverse_path()` 把 `newbee-intro` 还原成 `newbee/intro` → `is_dir()` 判否直接丢弃
-2. 还原修好后又撞上**子目录过滤** —— `mywork` 先被收录，`mywork/newbee_intro` 被当子目录吃掉
-
-（注：最初统计「被子目录过滤丢弃 = 0 个」是假象 —— 因为它在第 1 关就没进候选集，根本走不到第 2 关。）
-
-3. topic 建出来后仍无消息 —— **正向编码另有 5 处副本**：`cwd.replace("/", "-")`（`api_server.py:140,899` + `state.py:100,139,188`）同样漏掉 `_` 和 `.`，导致 `_recover_active_sessions` 找不到 transcript 目录 → watcher 起不来 → topic 是空的
-
-4. topic 的 welcome 消息退化成一句「直接发消息开始对话」—— `_send_topic_welcome`（`bot.py:772`）本该带最近 3 轮对话摘要，但建 topic 时（23:20:50）`state.get_recent_history()` 仍是坏版本（23:24 才重启生效），读到 0 轮 → 走退化分支
-
-**教训**：第一次只修了解码方向就报「已修复」，用户追问「你确信吗」才查出正向编码还有 5 份副本；用户再追问「其他 topic 怎么有消息」才发现 welcome 也是受害点。**同一个假设散落 6 处**是这个 bug 能活这么久的原因 —— 每次只修一处都会留下"看起来还是坏的"的表象。
-
-**排查中被证伪的两个猜想**（记下来避免重走）：
-- ❌「其他 session 一直在产出所以有消息」— 实测今天(07-29)除 code-anywhere(22 条)外**所有 topic 都是 0 条新消息**，用户看到的是历史消息堆积
-- ❌「建 topic 建晚了」— 时间点无关；只要 `state.py` 没修，任何时刻建 topic 的 welcome 都是空的
-
-**修法**：编解码统一收敛到 `src/projects.py`，其余模块一律调用，不再自己拼字符串：
-- `reverse_path(hash_name)` — 目录名 → 真实路径，逐段拿 `[-_.]` 正则去父目录实际匹配（替代只试连字符的字面拼接）
-- `claude_dir(project_dir)` — 真实路径 → transcript 目录，先按 `[/_.]→-` 编码直取，失败则反查兜底
-- 子目录过滤改判据 — 只过滤「与父项目**同属一个 git 仓库**」的子目录（如 `repo/poc`）；容器型目录下的独立项目（`~/workspace/mywork/*`）各自成项目
-
-**验证**：
-- discover 6 → 7 个，`newbee_intro` 正确收录；同 repo 子目录仍被过滤（回归通过）
-- 编解码往返一致性：15 个 transcript 目录全部 `name → path → name` 闭合，0 不一致
-- 端到端：重启后 `[sync] newbee_intro → topic 20870` → `[recover] newbee_intro → pane=%18 sid=dd0e6606 topic=20870` → `[watcher] start` 全链路打通
-
----
-
-<details><summary>原始诊断记录</summary>
-
-**现象**：`ws-zhangxu` pane（`%18`，cwd `~/workspace/mywork/newbee_intro`）在 TG 上没有 topic，消息完全不通。
-
-**根因**：`src/projects.py:75-91 _reverse_path()`。Claude 的 transcript 目录名把 `/` `_` `.` 统统编码成 `-`，还原时只尝试合并成连字符，于是：
-```
--Users-zhangxu-workspace-mywork-newbee-intro
-  → /Users/zhangxu/workspace/mywork/newbee/intro   ← 不存在
-  → discover() 第 100 行 is_dir() 判否 → 丢弃
-  → 永远不建 topic → session_start 收到回调也只能「未绑定话题，跳过」
-```
-日志实证：`logs/code-anywhere.log:28051-28052`（2026-07-28 18:25:03）。
-
-**影响面**：当前仅 1 个（newbee_intro），但 `~/workspace/mywork/` 下 `team_by_topic`、`mi_service_http`、`slides_processor` 等含下划线目录一旦跑 claude 都会中招。
-
-**修法**：还原时每段候选用 `[-_.]` 正则匹配父目录下的实际条目名，而非只试连字符。
-
-</details>
+已统一到 `projects.py` 并验证 15 个目录往返；诊断与验证详见 `wiki/project-discovery.md`。
 
 #### 5.2 僵尸 topic 积累 🟡（已盘点，待用户裁决）
 

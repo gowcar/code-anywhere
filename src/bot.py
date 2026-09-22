@@ -30,6 +30,7 @@ from src.renderer import split_message, format_tool_use, send_ephemeral
 from src import state
 from src import projects
 from src import recon
+from src import backends
 
 log = logging.getLogger("code-anywhere.bot")
 
@@ -90,6 +91,105 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+# ============ /model ============
+
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not auth_check(update.effective_user.id):
+        return
+    cwd = _update_cwd(update)
+    if not cwd:
+        await update.message.reply_text("请在已绑定的项目话题内使用 /model")
+        return
+    args = context.args or []
+    backend = {"gpt": "codex"}.get(args[0].lower(), args[0].lower()) if args else None
+    from src import permissions
+    mode = args[1].lower() if len(args) == 2 else None
+    if (len(args) > 2 or (backend and backend not in {"claude", "codex"})
+            or (mode and (backend != "codex" or mode not in permissions.MODES))):
+        await update.message.reply_text("用法：/model codex [full|workspace|read-only] 或 /model claude；/model 查看状态。")
+        return
+    async with _project_locks.setdefault(cwd, asyncio.Lock()):
+        if backend:
+            previous = backends.get_backend(cwd)
+            if previous != backend:
+                old_pane = await _find_pane_for_project(cwd)
+                if old_pane:
+                    # Escape interrupts the old turn/retry without exiting its CLI.
+                    await backends.command("tmux", "send-keys", "-t", old_pane, "Escape")
+            backends.set_backend(cwd, backend)
+            from src.api_server import retire_project_watchers
+            retire_project_watchers(cwd, backend)
+            stop_typing(update.message.message_thread_id or update.message.chat_id)
+            if mode:
+                await update.message.reply_text("正在切换权限，当前回合会中断，随后恢复原会话。")
+                try:
+                    await permissions.apply_mode(cwd, mode, update.message.chat_id,
+                                                 update.message.message_thread_id or update.message.chat_id)
+                except Exception as exc:
+                    log.exception("[permissions] switch failed project=%s", cwd)
+                    await update.message.reply_text(f"⚠️ 权限切换未完成：{exc}")
+                    return
+            else:
+                pane = await _find_pane_for_project(cwd)
+                if pane:
+                    from src.api_server import register_pane_watcher
+                    await register_pane_watcher(pane, cwd)
+        selected = backends.get_backend(cwd)
+        from src.api_server import terminal_sessions
+        current = next((v for v in terminal_sessions.values()
+                        if v.get("cwd") == cwd and v.get("backend", "claude") == selected), {})
+        model = current.get("model") or (os.getenv("CODEX_MODEL") if selected == "codex" else "")
+        description = "GPT / Codex" if selected == "codex" else "Claude"
+        permission_text = ("\n权限：" + permissions.LABELS.get(
+            mode or current.get("permission_mode"), "未观测（配置为 " + permissions.LABELS[permissions.get_mode(cwd)] + "）")
+            if selected == "codex" else "")
+        await update.message.reply_text(
+            f"{Path(cwd).name}：{description}"
+            + (f" · {model}" if model else "（使用本机 CLI 配置的模型）")
+            + permission_text
+            + "\n直接发消息继续。切换：/model codex full 或 /model claude"
+            + ("\nClaude/Codex 各自保留历史；跨引擎通过项目文件和 recon 接续。" if backend else "")
+        )
+
+
+async def cmd_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not auth_check(update.effective_user.id):
+        return
+    from src import permissions
+    cwd = _update_cwd(update)
+    if not cwd:
+        await update.message.reply_text("请在已绑定的项目话题内使用 /permissions")
+        return
+    if backends.get_backend(cwd) != "codex":
+        await update.message.reply_text("请先 /model codex，或直接 /model codex full。")
+        return
+    args = context.args or []
+    mode = args[0].lower() if args else None
+    if len(args) > 1 or (mode and mode not in permissions.MODES):
+        await update.message.reply_text("用法：/permissions full、/permissions workspace 或 /permissions read-only")
+        return
+    async with _project_locks.setdefault(cwd, asyncio.Lock()):
+        if mode:
+            await update.message.reply_text("正在切换权限，当前回合会中断，随后恢复原会话。")
+            try:
+                await permissions.apply_mode(cwd, mode, update.message.chat_id,
+                                             update.message.message_thread_id or update.message.chat_id)
+            except Exception as exc:
+                log.exception("[permissions] switch failed project=%s", cwd)
+                await update.message.reply_text(f"⚠️ 权限切换未完成：{exc}")
+                return
+        from src.api_server import terminal_sessions
+        current = next((v for v in terminal_sessions.values()
+                        if v.get("cwd") == cwd and v.get("backend") == "codex"), {})
+        effective = mode or current.get("permission_mode")
+        text = permissions.LABELS.get(effective, "未观测")
+        await update.message.reply_text(
+            f"{Path(cwd).name} · Codex\n当前权限：{text}\n"
+            f"启动配置：{permissions.LABELS[permissions.get_mode(cwd)]}\n"
+            "切换：/permissions full、/permissions workspace、/permissions read-only\n"
+            "Full 可访问本机文件与网络；切换后可直接继续。")
+
+
 # ============ /sessions ============
 
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,6 +207,9 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("此话题未绑定项目")
         return
 
+    if backends.get_backend(project_path) == "codex":
+        await update.message.reply_text("当前是 Codex 会话，历史由本机 codex resume 管理。用 /model claude 可返回 Claude。")
+        return
     history = state.scan_project_sessions(project_path)
     if not history:
         await update.message.reply_text("暂无历史会话")
@@ -180,15 +283,15 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         return
+    from src.api_server import terminal_sessions
     lines = ["<b>活跃会话</b>\n"]
-    if not active_sessions:
+    for sid, info in terminal_sessions.items():
+        name = html_lib.escape(Path(info["cwd"]).name)
+        engine = info.get("backend", "claude")
+        model = html_lib.escape(info.get("model") or engine)
+        lines.append(f"🟢 {name} · {model} ({sid[:8]})")
+    if not terminal_sessions:
         lines.append("（暂无）")
-    for key, s in active_sessions.items():
-        alive = s.proc and s.proc.returncode is None
-        icon = "🟢" if alive else "🔴"
-        sid = s.session_id[:8] + "..." if s.session_id else "N/A"
-        name = Path(s.cwd).name
-        lines.append(f"{icon} {name} ({sid})")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -239,7 +342,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_val = not state.is_trusted(path)
         state.set_trusted(path, new_val)
         try:
-            await query.answer(f"{'已信任' if new_val else '已取消信任'}: {Path(path).name}")
+            note = "；Codex 权限在重启其终端后生效" if backends.get_backend(path) == "codex" else ""
+            await query.answer(f"{'已信任' if new_val else '已取消信任'}: {Path(path).name}{note}")
         except Exception:
             pass
         try:
@@ -247,6 +351,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning(f"[trust] edit markup 失败（忽略）: {e}")
         return
+
+    if data == "new" or data.startswith("r:"):
+        path = projects.get_path(query.message.message_thread_id)
+        if path and backends.get_backend(path) == "codex":
+            await query.answer("当前为 Codex，请先 /model claude", show_alert=True)
+            return
 
     if data == "new":
         topic_id = query.message.message_thread_id
@@ -310,89 +420,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ 消息处理 ============
 
 async def _inject_tmux(pane: str, text: str):
-    """通过 tmux 把文本注入到 claude REPL，再回车提交。
-
-    多行文本走 bracketed paste（set-buffer + paste-buffer -p）：claude REPL 会
-    把它识别成「一次粘贴」，内嵌换行不再被当成逐行提交 —— 否则多行脚本会在
-    第一个换行处就被拆断、只提交半截（长期潜伏的老坑：单行没事、多行 heredoc
-    一发就散架）。单行仍走 send-keys -l，行为完全不变、零风险。
-    """
-    mode = "paste" if "\n" in text else "keys"
-    if mode == "paste":
-        buf = "ca_inject"  # 具名 buffer，用完即删，不污染默认 buffer 栈
-        proc = await asyncio.create_subprocess_exec(
-            "tmux", "set-buffer", "-b", buf, "--", text,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
-        proc = await asyncio.create_subprocess_exec(
-            "tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", pane,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
-        await asyncio.sleep(0.1)  # 给 REPL 一点时间把粘贴内容落进输入框
+    """Paste one whole message, checking every tmux operation before Enter."""
+    if "\n" in text:
+        buf = f"ca_inject_{pane.lstrip('%')}"
+        await backends.command("tmux", "set-buffer", "-b", buf, "--", text)
+        await backends.command("tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", pane)
+        await asyncio.sleep(0.15)
     else:
-        proc = await asyncio.create_subprocess_exec(
-            "tmux", "send-keys", "-t", pane, "-l", text,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
-    # 发送 Enter 提交（bracketed paste 的换行不提交，只有这个 Enter 提交整块）
-    proc = await asyncio.create_subprocess_exec(
-        "tmux", "send-keys", "-t", pane, "Enter",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.wait()
-    log.info(f"[tmux] injected to {pane} ({mode}): {text[:60]}")
+        await backends.command("tmux", "send-keys", "-t", pane, "-l", "--", text)
+        await asyncio.sleep(0.15)
+    await backends.command("tmux", "send-keys", "-t", pane, "Enter")
+    log.info("[tmux] injected pane=%s chars=%s", pane, len(text))
 
 
 _SHELL_CMDS = {"fish", "bash", "zsh", "sh", "tcsh", "csh", "ksh", "dash"}
 
 
 async def _pane_has_claude(pane_id: str) -> bool:
-    """检测 pane 的 tty 上是否有 claude 进程在跑
+    return bool(await backends.pane_processes(pane_id, "claude"))
 
-    macOS 上 `pane_current_command` 不可靠（fish→claude 可能返回 fish），
-    因此走 ps 查 tty 进程列表，看是否存在名为 `claude` 的进程。
-    """
-    if not pane_id:
-        return False
-    try:
-        p1 = await asyncio.create_subprocess_exec(
-            "tmux", "display-message", "-p", "-t", pane_id, "#{pane_tty}",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await p1.communicate()
-        tty = (out.decode(errors="ignore").strip())
-        if not tty:
-            return False
-        tty_name = tty.rsplit("/", 1)[-1]
-        p2 = await asyncio.create_subprocess_exec(
-            "ps", "-t", tty_name, "-o", "comm=",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out2, _ = await p2.communicate()
-        for line in out2.decode(errors="ignore").splitlines():
-            name = line.strip().rsplit("/", 1)[-1]
-            if name == "claude":
-                return True
-        return False
-    except Exception:
-        return False
+
+async def _pane_has_backend(pane_id: str, cwd: str) -> bool:
+    return bool(await backends.pane_processes(pane_id, backends.get_backend(cwd)))
 
 
 async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None) -> str | None:
-    """在 tmux 中给 cwd 起一个 claude pane。复用现有 tmux session（第一个可见的），没有则建一个。
-
-    步骤：
-      1. new-window -c <cwd> -P -F '#{pane_id}' claude 拿新 pane_id
-      2. 轮询 _pane_has_claude(pane_id)，最多 15s
-      3. hook 触发后 pane 自带 @ca_project 标签，下轮 _find_pane_for_project 也能命中
-    """
+    """Start the selected native CLI in tmux, then attach its transcript watcher."""
     try:
         norm_cwd = str(Path(cwd).resolve())
     except Exception:
@@ -423,10 +476,14 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
 
     # 起 new-window 跑 claude；-P -F 拿新 pane id
     # 关键：tmux server env 通常无 CLAUDE_CODE_OAUTH_TOKEN，claude 会秒退 → 用 -e 从当前进程 env 显式传
-    proj_name = Path(norm_cwd).name
+    backend = backends.get_backend(cwd)
+    proj_name = Path(norm_cwd).name + ("-codex" if backend == "codex" else "")
     import os as _os
     tmux_env_args: list[str] = []
-    for env_key in ("CLAUDE_CODE_OAUTH_TOKEN",):
+    env_keys = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}
+    if backend == "codex":
+        env_keys.update(backends.codex_env_keys())
+    for env_key in sorted(env_keys):
         v = _os.environ.get(env_key)
         if v:
             tmux_env_args += ["-e", f"{env_key}={v}"]
@@ -434,7 +491,8 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
         proc = await asyncio.create_subprocess_exec(
             "tmux", "new-window", "-t", tmux_session, "-c", norm_cwd, "-n", proj_name,
             *tmux_env_args,
-            "-P", "-F", "#{pane_id}", "claude",
+            "-P", "-F", "#{pane_id}",
+            *(backends.codex_launch_args(cwd) if backend == "codex" else ["claude"]),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await proc.communicate()
@@ -449,37 +507,43 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     if not pane_id:
         return None
     log.info(f"[ensure_pane] created pane={pane_id} for {proj_name}")
+    await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_project", norm_cwd)
+    await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_backend", backend)
 
     # 等 claude 起来（最多 15s），且要求持续存在 ≥ 2s（防秒退 fallback 到 fish 的假 ready）
     stable_since: float | None = None
     ready = False
     for _ in range(30):
         await asyncio.sleep(0.5)
-        alive = await _pane_has_claude(pane_id)
+        alive = await _pane_has_backend(pane_id, cwd)
         if alive:
             if stable_since is None:
                 stable_since = time.time()
             elif time.time() - stable_since >= 2.0:
-                log.info(f"[ensure_pane] pane={pane_id} claude ready & stable")
+                log.info(f"[ensure_pane] pane={pane_id} {backend} ready & stable")
                 ready = True
                 break
         else:
             if stable_since is not None:
-                log.warning(f"[ensure_pane] pane={pane_id} claude 秒退（可能 auth 失败），放弃")
+                log.warning(f"[ensure_pane] pane={pane_id} {backend} 秒退（可能 auth 失败），放弃")
                 return None
             stable_since = None
 
     if not ready:
-        log.warning(f"[ensure_pane] pane={pane_id} claude 未在 15s 内就绪")
+        log.warning(f"[ensure_pane] pane={pane_id} {backend} 未在 15s 内就绪")
         return None
 
     # 主动给这个 pane 注册 watcher — 不依赖 SessionStart hook 自动触发
     # （新 pane 起 claude 时 hook 不总是能触发，具体原因未知；直接注册最可靠）
     try:
         from src.api_server import register_pane_watcher
-        await register_pane_watcher(pane_id, norm_cwd)
+        # Fresh Codex writes its rollout only after the first user prompt.
+        if backend == "claude" or await backends.codex_transcript(pane_id, norm_cwd):
+            if not await register_pane_watcher(pane_id, norm_cwd):
+                return None
     except Exception as e:
         log.warning(f"[ensure_pane] register_pane_watcher failed: {e}")
+        return None
 
     return pane_id
 
@@ -511,7 +575,7 @@ async def _find_pane_for_project(cwd: str) -> str | None:
             except Exception:
                 continue
             pane = info.get("tmux_pane") or ""
-            if pane and await _pane_has_claude(pane):
+            if pane and await _pane_has_backend(pane, cwd):
                 return pane
     except Exception:
         pass
@@ -559,7 +623,7 @@ async def _find_pane_for_project(cwd: str) -> str | None:
     # 用 ps 二次过滤：只保留 tty 上真有 claude 进程的 pane
     candidates: list[tuple[int, str]] = []
     for prio, pid in raw_candidates:
-        if await _pane_has_claude(pid):
+        if await _pane_has_backend(pid, cwd):
             candidates.append((prio, pid))
 
     if not candidates:
@@ -709,7 +773,31 @@ def _build_file_prompt(rel_path: str, ext: str, caption: str) -> str:
     return f"{ref}\n看看这个"
 
 
+_project_locks: dict[str, asyncio.Lock] = {}
+
+
+def _update_cwd(update: Update) -> str | None:
+    msg = update.effective_message
+    if not msg:
+        return None
+    return (state.get_cwd(msg.chat_id) if msg.chat.type == "private"
+            else projects.get_path(msg.message_thread_id))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cwd = _update_cwd(update)
+    if not cwd:
+        return await _handle_message(update, context)
+    async with _project_locks.setdefault(cwd, asyncio.Lock()):
+        try:
+            await _handle_message(update, context)
+        except Exception:
+            log.exception("[msg] delivery failed project=%s", cwd)
+            stop_typing(update.message.message_thread_id or update.message.chat_id)
+            await update.message.reply_text("⚠️ 消息投递失败，请查看 /model 和服务日志后重试。")
+
+
+async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         user = update.effective_user
         await update.message.reply_text(
@@ -799,17 +887,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_pane = await _ensure_pane_for_project(cwd, chat_id, message.message_thread_id)
     if not target_pane:
         await message.reply_text(
-            "⚠️ 起 claude pane 失败。请手动 tmux new-window 到此项目跑 claude。"
+            f"⚠️ {backends.get_backend(cwd)} 终端启动失败，请检查本机 CLI 的登录和网关配置。"
         )
         return
+
+    # Always verify the actual Codex rollout before injecting a message.
+    # Existing terminals can change sessions independently of the bot.
+    codex_first_turn = False
+    if backends.get_backend(cwd) == "codex":
+        from src.api_server import register_pane_watcher
+        codex_first_turn = not await backends.codex_transcript(target_pane, cwd)
+        if not codex_first_turn and not await register_pane_watcher(target_pane, cwd):
+            await message.reply_text("⚠️ 尚未找到 Codex 会话日志，请在终端完成启动后重试。")
+            return
 
     # 标记：来源=TG（watcher 跳过 user event ephemeral 避免重复）+ 本轮首条 assistant text 应 quote-reply 到这条用户消息
     if not is_private and topic_id:
         from src.api_server import mark_tg_input, mark_tg_reply_target
         mark_tg_input(topic_id, text)
         mark_tg_reply_target(topic_id, message.message_id)
-    await _inject_tmux(target_pane, text)
     start_typing(context.bot, chat_id, session_key)
+    await _inject_tmux(target_pane, text)
+    if codex_first_turn:
+        # Replay only this freshly created rollout, so fast first replies cannot be lost.
+        if not await register_pane_watcher(target_pane, cwd, from_start=True):
+            stop_typing(session_key)
+            await message.reply_text("⚠️ 已投递，但 Codex 尚未生成日志；请检查终端的启动提示。")
 
 
 # ============ 构建 App ============
@@ -1046,6 +1149,8 @@ def create_app() -> Application:
 
     async def post_init(application):
         await application.bot.set_my_commands([
+            BotCommand("model", "切换模型：codex full / claude"),
+            BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
             BotCommand("status", "活跃会话"),
@@ -1071,6 +1176,8 @@ def create_app() -> Application:
         asyncio.create_task(periodic_sync())
     app.post_init = post_init
 
+    app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("permissions", cmd_permissions))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("sessions", cmd_sessions))

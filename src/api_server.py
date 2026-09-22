@@ -25,6 +25,7 @@ from pathlib import Path
 from aiohttp import web
 
 from src.config import BOT_PORT
+from src import backends
 from src import projects
 from src import state
 import src.config as config
@@ -310,54 +311,86 @@ def set_bot(bot, tg_app):
     _tg_app = tg_app
 
 
-async def register_pane_watcher(pane_id: str, cwd: str) -> bool:
-    """给一个已经在跑 claude 的 tmux pane 主动建 watcher（不依赖 SessionStart hook）。
+def retire_project_watchers(cwd: str, backend: str, keep_sid: str | None = None):
+    """Remove inactive backend / stale native sessions for this project."""
+    for sid, info in list(terminal_sessions.items()):
+        if info.get("cwd") != cwd:
+            continue
+        if info.get("backend", "claude") == backend and (keep_sid is None or sid == keep_sid):
+            continue
+        task = _watchers.pop(sid, None)
+        if task:
+            task.cancel()
+        terminal_sessions.pop(sid, None)
 
-    找 cwd 目录下最新（mtime）的 jsonl → sid = 文件名 → 注册 terminal_session + 起 watcher。
-    幂等：如果已在 terminal_sessions 就不重复注册。
-    """
+
+async def register_pane_watcher(pane_id: str, cwd: str, from_start: bool = False) -> bool:
     if not _bot or not config.CHAT_ID:
         return False
     topic_id = projects.get_topic(cwd)
     if not topic_id:
-        log.info(f"[register_pane] {cwd} 未绑定 topic，跳过")
         return False
-
-    # 等最多 3s 让 claude 写第一条到 jsonl
+    backend = backends.get_backend(cwd)
+    if not await backends.pane_processes(pane_id, backend):
+        return False
     latest = None
-    for _ in range(6):
-        proj_path = projects.claude_dir(cwd)
-        if proj_path:
-            jsonl_files = sorted(proj_path.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
-            if jsonl_files:
-                latest = jsonl_files[0]
-                break
+    sid = None
+    for _ in range(10):
+        if backend == "codex":
+            found = await backends.codex_transcript(pane_id, cwd)
+            if found:
+                sid, path = found
+                latest = Path(path)
+        else:
+            proj_path = projects.claude_dir(cwd)
+            files = list(proj_path.glob("*.jsonl")) if proj_path else []
+            if files:
+                latest = max(files, key=lambda x: x.stat().st_mtime)
+                sid = latest.stem
+        if latest:
+            break
         await asyncio.sleep(0.5)
-
-    if not latest:
-        log.warning(f"[register_pane] {cwd} 未找到 jsonl")
+    if not latest or not sid:
+        log.warning("[register_pane] no %s transcript: %s pane=%s", backend, cwd, pane_id)
         return False
-
-    sid = latest.stem
-    if sid in terminal_sessions:
-        log.info(f"[register_pane] sid={sid[:12]} 已注册，跳过")
+    if backend == "codex":
+        backends.remember_codex(cwd, sid)
+    retire_project_watchers(cwd, backend, keep_sid=sid)
+    existing = _watchers.get(sid)
+    if sid in terminal_sessions and existing and not existing.done():
+        terminal_sessions[sid]["tmux_pane"] = pane_id
         return True
-
+    model = ""
+    permission_mode = None
+    if backend == "codex":
+        # Model changes are recorded in turn_context, including resumed sessions.
+        with latest.open() as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                    if ev.get("type") == "turn_context":
+                        model = ev.get("payload", {}).get("model", model)
+                        permission_mode = backends.normalize_codex(ev).get("permission_mode")
+                except ValueError:
+                    continue
+    if backend == "codex":
+        # A restart's launch flags take effect before the next turn_context exists.
+        tagged_mode = await backends.command("tmux", "display-message", "-p", "-t", pane_id, "#{@ca_permission}")
+        if tagged_mode in {"full", "workspace", "read-only"}:
+            permission_mode = tagged_mode
     terminal_sessions[sid] = {
-        "topic_id": topic_id,
-        "chat_id": config.CHAT_ID,
-        "cwd": cwd,
-        "tmux_pane": pane_id,
-        "model": "",
+        "permission_mode": permission_mode,
+        "topic_id": topic_id, "chat_id": config.CHAT_ID, "cwd": cwd,
+        "tmux_pane": pane_id, "model": model, "backend": backend,
         "transcript_path": str(latest),
     }
     old = _watchers.pop(sid, None)
     if old:
         old.cancel()
-    _watchers[sid] = asyncio.create_task(
-        _watch_transcript(sid, str(latest), topic_id, config.CHAT_ID)
-    )
-    log.info(f"[register_pane] {Path(cwd).name} pane={pane_id} sid={sid[:12]} → topic {topic_id}")
+    # Establish byte offset NOW, before callers can inject the first message.
+    _watchers[sid] = asyncio.create_task(_watch_transcript(
+        sid, str(latest), topic_id, config.CHAT_ID, start_pos=0 if from_start else latest.stat().st_size))
+    log.info("[register_pane] %s %s pane=%s sid=%s topic=%s", backend, Path(cwd).name, pane_id, sid, topic_id)
     return True
 
 
@@ -390,6 +423,10 @@ async def handle_session_start(request: web.Request) -> web.Response:
         log.info(f"[session_start] {Path(cwd).name} 无 tmux pane，跳过（非交互式）")
         return web.json_response({"ok": True})
 
+    if backends.get_backend(cwd) != "claude":
+        return web.json_response({"ok": True, "ignored": "inactive backend"})
+    retire_project_watchers(cwd, "claude", keep_sid=session_id)
+
     # 记录终端会话
     terminal_sessions[session_id] = {
         "topic_id": topic_id,
@@ -419,7 +456,7 @@ async def handle_session_start(request: web.Request) -> web.Response:
 _watchers: dict[str, asyncio.Task] = {}
 
 
-async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int):
+async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int, start_pos: int | None = None):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import base64 as _b64
     import io as _io
@@ -449,7 +486,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
 
     # 跳到文件末尾（只监听新内容）
     try:
-        last_pos = Path(path).stat().st_size
+        last_pos = Path(path).stat().st_size if start_pos is None else start_pos
     except Exception:
         pass
 
@@ -474,10 +511,14 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
         except Exception:
             return False
 
+    backend = terminal_sessions.get(session_id, {}).get("backend", "claude")
+    cwd = terminal_sessions.get(session_id, {}).get("cwd", "")
     pane_check_counter = 0
     try:
         while True:
             await asyncio.sleep(0.5)
+            if cwd and backends.get_backend(cwd) != backend:
+                break
             # 每 30 秒检查一次 pane 是否还活着
             pane_check_counter += 1
             if pane_check_counter >= 60:
@@ -496,12 +537,16 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
             diff = file_size - last_pos
             log.info(f"[watcher] new data +{diff} bytes")
 
-            with open(path, "r") as f:
+            with open(path, "rb") as f:
                 f.seek(last_pos)
-                new_data = f.read()
-                last_pos = f.tell()
+                new_bytes = f.read()
+            end = new_bytes.rfind(b"\n")
+            if end < 0:
+                continue
+            last_pos += end + 1
+            new_data = new_bytes[:end + 1].decode("utf-8", errors="replace")
 
-            for line in new_data.strip().split("\n"):
+            for line in new_data.splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -509,6 +554,17 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                 except json.JSONDecodeError:
                     continue
 
+                if backend == "codex":
+                    event = backends.normalize_codex(event)
+                    if event is None:
+                        continue
+                    if event.get("type") == "system":
+                        terminal_sessions.get(session_id, {})["model"] = event.get("model", "")
+                        if event.get("permission_mode"):
+                            terminal_sessions.get(session_id, {})["permission_mode"] = event["permission_mode"]
+                    elif event.get("type") == "result":
+                        from src.bot import stop_typing
+                        stop_typing(topic_id)
                 event_type = event.get("type")
                 event_uuid = event.get("uuid")
 
@@ -921,6 +977,8 @@ async def handle_sessions_active(request: web.Request) -> web.Response:
             "title": title,
             "tmux_pane": pane,
             "model": info.get("model", ""),
+            "backend": info.get("backend", "claude"),
+            "permission_mode": info.get("permission_mode"),
             "topic_id": info.get("topic_id"),
             "subscribers": len(_sse_subs.get(sid, [])),
             "last_activity_at": last_activity,
@@ -1002,6 +1060,8 @@ async def handle_session_input(request: web.Request) -> web.Response:
     if not info:
         return web.json_response({"error": "session not found"}, status=404)
 
+    if backends.get_backend(info["cwd"]) != info.get("backend", "claude"):
+        return web.json_response({"error": "inactive backend; refresh sessions"}, status=409)
     pane = info.get("tmux_pane")
     if not pane:
         return web.json_response({"error": "non-interactive session (no tmux pane)"}, status=400)
@@ -1016,9 +1076,14 @@ async def handle_session_input(request: web.Request) -> web.Response:
         return web.json_response({"error": "text required"}, status=400)
 
     # 懒导入避免循环
-    from src.bot import _inject_tmux
+    from src.bot import _inject_tmux, _project_locks
     try:
-        await _inject_tmux(pane, text)
+        async with _project_locks.setdefault(info["cwd"], asyncio.Lock()):
+            if backends.get_backend(info["cwd"]) != info.get("backend", "claude"):
+                return web.json_response({"error": "inactive backend"}, status=409)
+            if not await backends.pane_processes(pane, info.get("backend", "claude")):
+                return web.json_response({"error": "terminal is no longer running"}, status=409)
+            await _inject_tmux(pane, text)
     except Exception as e:
         log.warning(f"[web-input] inject fail: {e}")
         return web.json_response({"error": f"inject failed: {e}"}, status=500)
@@ -1056,74 +1121,15 @@ async def start_api_server():
 
 
 async def _recover_active_sessions():
-    """Bot 启动时扫 tmux 里 cmd=claude 的 pane，为它们各自最新的 jsonl 建 watcher。
-
-    单 session 模式：每个绑定项目最多一个活跃 session（取 jsonl mtime 最新者）。
-    """
+    """Recover only selected native CLI processes, including Codex after restart."""
     if not _bot or not config.CHAT_ID:
         return
-
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_current_command} #{pane_current_path}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return
-    except Exception:
-        return
-
-    # 单 session 模式：每个 cwd 最多注册一个 session（取该 cwd jsonl mtime 最新者）
-    # 若同一项目历史上跑过多 pane，取最近活跃的那个 pane，其余 pane 留给用户自己清理
-    seen_cwd: set[str] = set()
-    panes_by_cwd: dict[str, list[str]] = {}
-    for line in result.stdout.strip().split("\n"):
-        if not line:
-            continue
-        parts = line.split(" ", 2)
-        if len(parts) < 3:
-            continue
-        pane_id, cmd, cwd = parts
-        panes_by_cwd.setdefault(cwd, []).append(pane_id)
-
-    for cwd, panes in panes_by_cwd.items():
-        if cwd in seen_cwd:
-            continue
-        topic_id = projects.get_topic(cwd)
-        if not topic_id:
-            continue
-
-        proj_path = projects.claude_dir(cwd)
-        if not proj_path:
-            continue
-
-        jsonl_files = sorted(proj_path.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
-        if not jsonl_files:
-            continue
-
-        latest = jsonl_files[0]
-        session_id = latest.stem
-        if session_id in terminal_sessions:
-            seen_cwd.add(cwd)
-            continue
-
-        # 把最新 jsonl 关联到该 cwd 下"第一个" pane（pane 谁是真不影响投递，watcher 按 sid 走）
-        pane_id = panes[0]
-
-        terminal_sessions[session_id] = {
-            "topic_id": topic_id,
-            "chat_id": config.CHAT_ID,
-            "cwd": cwd,
-            "tmux_pane": pane_id,
-            "model": "",
-            "transcript_path": str(latest),
-        }
-
-        _watchers[session_id] = asyncio.create_task(
-            _watch_transcript(session_id, str(latest), topic_id, config.CHAT_ID)
-        )
-        seen_cwd.add(cwd)
-        extra = f" (other panes ignored: {','.join(panes[1:])})" if len(panes) > 1 else ""
-        log.info(f"[recover] {Path(cwd).name} → pane={pane_id} sid={session_id[:12]} topic={topic_id}{extra}")
+    from src.bot import _find_pane_for_project, _project_locks
+    for topic_id, cwd in projects.all_bindings().items():
+        async with _project_locks.setdefault(cwd, asyncio.Lock()):
+            try:
+                pane = await _find_pane_for_project(cwd)
+                if pane:
+                    await register_pane_watcher(pane, cwd)
+            except Exception:
+                log.exception("[recover] failed project=%s", cwd)

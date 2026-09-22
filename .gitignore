@@ -8,6 +8,12 @@ __pycache__/
 .state.json
 .projects.json
 .bindings.json
+.backends.json
+.backends.tmp
+.codex-sessions.json
+.codex-sessions.tmp
+.permissions.json
+.permissions.tmp
 *.bak
 
 # Logs
