@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 from html import escape
@@ -19,21 +20,42 @@ STATES = [  # (标签, 标题)，按展示顺序
 ]
 
 
+# 待验证 issue 的评论里约定有一行「验证方法：…」（兼容早期的“如何验证/验证方式”）
+VERIFY_LINE = re.compile(r"^[\s>*_\-]*(?:验证方法|如何验证|验证方式)[*_]*\s*[:：]\s*(.+)$")
+
+
+def _get(host: str, token: str, path: str, **params) -> list | dict:
+    query = urllib.parse.urlencode(params)
+    req = urllib.request.Request(f"https://{host}/api/v4/{path}?{query}", headers={"PRIVATE-TOKEN": token})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)
+
+
+def verify_hint(notes: list[dict]) -> str | None:
+    """最新一条带「验证方法：」的评论里的那一行。"""
+    for note in sorted(notes, key=lambda n: n.get("created_at", ""), reverse=True):
+        for line in note.get("body", "").splitlines():
+            match = VERIFY_LINE.match(line)
+            if match:
+                return match.group(1).strip().strip("*_ ")
+    return None
+
+
 def fetch_open_issues(host: str | None = None) -> list[dict]:
     host = host or os.getenv("GITLAB_HOST", "git.garena.com")
     token = TOKEN_FILE.read_text().strip()
     issues, page = [], 1
     while True:
-        query = urllib.parse.urlencode({"scope": "created_by_me", "state": "opened",
-                                        "per_page": 100, "page": page})
-        req = urllib.request.Request(f"https://{host}/api/v4/issues?{query}",
-                                     headers={"PRIVATE-TOKEN": token})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            batch = json.load(resp)
+        batch = _get(host, token, "issues", scope="created_by_me", state="opened", per_page=100, page=page)
         issues += batch
         if len(batch) < 100:
-            return issues
+            break
         page += 1
+    for issue in issues:
+        if "agent:to-verify" in issue.get("labels", []):
+            notes = _get(host, token, f"projects/{issue['project_id']}/issues/{issue['iid']}/notes", per_page=100)
+            issue["verify_hint"] = verify_hint([n for n in notes if not n.get("system")])
+    return issues
 
 
 def format_summary(issues: list[dict]) -> str:
@@ -56,5 +78,8 @@ def format_summary(issues: list[dict]) -> str:
             short = f"{repo.rsplit('/', 1)[-1]}#{num}"
             lines.append(f'• <a href="{escape(issue["web_url"], quote=True)}">{escape(short)}</a> '
                          f'{escape(issue.get("title", ""))}')
+            if label == "agent:to-verify":
+                hint = issue.get("verify_hint")
+                lines.append(f"　↳ 验证：{escape(hint[:200])}" if hint else "　↳ ⚠️ 未写验证方法，可在 issue-desk 追问")
     lines.append("\n验证通过/不通过，在 issue-desk 话题里说即可。")
     return "\n".join(lines)

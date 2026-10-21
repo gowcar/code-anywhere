@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # gitlab-upload <group/repo> <文件>... —— 上传附件到 GitLab 仓库，输出可直接贴进 issue 的 markdown
 # 令牌读 ~/.config/gitlab-token，域名读 GITLAB_HOST（默认 git.garena.com）
+# 上传成功后原件另存到 ~/.local/share/issue-files/<secret>/<文件名>：本机会话用 issue-images 直接取原图，
+# 不必经 GitLab 下载（14.x 的附件只认网页登录，令牌下载不了）
 set -euo pipefail
 [ $# -ge 2 ] || { echo "用法: gitlab-upload <group/repo> <文件>..." >&2; exit 2; }
 host=${GITLAB_HOST:-git.garena.com}; repo=$1; shift
 token=$(tr -d '[:space:]' < "$HOME/.config/gitlab-token")
 project=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$repo")
+store=${ISSUE_FILES:-$HOME/.local/share/issue-files}
 for f in "$@"; do
-  curl -fsS --header "PRIVATE-TOKEN: $token" -F "file=@$f" "https://$host/api/v4/projects/$project/uploads" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["markdown"])'
+  resp=$(curl -fsS --header "PRIVATE-TOKEN: $token" -F "file=@$f" "https://$host/api/v4/projects/$project/uploads")
+  url=$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])')   # /uploads/<secret>/<name>
+  mkdir -p "$store/$(dirname "${url#/uploads/}")" && cp "$f" "$store/${url#/uploads/}"
+  printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["markdown"])'
 done

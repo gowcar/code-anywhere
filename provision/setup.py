@@ -241,8 +241,8 @@ def step_python():
 
 
 def step_tools():
-    """个人工具：t / tmux-tui / cc / gitlab-upload → ~/.local/bin，tmux.conf → ~/.tmux.conf"""
-    targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "gitlab-upload")}
+    """个人工具：t / tmux-tui / cc / gitlab-upload / issue-images → ~/.local/bin，tmux.conf → ~/.tmux.conf"""
+    targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "gitlab-upload", "issue-images")}
     targets["tmux.conf"] = HOME / ".tmux.conf"
     for name, target in targets.items():
         source = REPO / "tools" / name

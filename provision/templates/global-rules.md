@@ -24,8 +24,9 @@
   `GITLAB_HOST=git.garena.com glab issue list --label agent:todo`
 - **接手**：先评论说明谁在处理，再把标签 `agent:todo` 改成 `agent:doing`：
   `glab issue note <N> -m "<会话名> 接手处理"`；`glab issue update <N> --unlabel agent:todo --label agent:doing`
+- **读 issue**：`glab issue view <N> --comments` 读正文和评论；**看截图用 `issue-images <仓库> <N>`**，它直接给出本机原图路径（所有会话在同一台机器上）。不要去 GitLab 网页或 API 下载附件，公司 GitLab 14.x 的附件只认浏览器登录。
 - **处理**：按项目原有纪律做（读 recon/PROGRESS、测试、发布授权边界不变）。issue 本身不构成发布、LIVE 写入或删除数据的授权。
-- **修完（等用户验证）**：推送分支；在 issue 里评论：改了什么、提交号与分支、**做不到或与原需求不同的部分**、用户怎么验证（装哪个版本 / 打开哪个页面）；然后 `glab issue update <N> --unlabel agent:doing --label agent:to-verify`，并在 TG 用一句话告诉用户“#N 已修好待验证”。**不要自己关闭 issue**，提交信息里用 `Refs #N`，不要写 `Closes #N`（会在合并时绕过用户验证自动关闭）。
+- **修完（等用户验证）**：推送分支；在 issue 里评论：改了什么、提交号与分支、**做不到或与原需求不同的部分**、用户怎么验证（装哪个版本 / 打开哪个页面）；评论里**必须有单独一行 `验证方法：<一句话写全前提和操作>`**，例如“验证方法：安装 iOS 0.2.67（需先删掉旧版重装），用正式账号登录，在 Chat β 点输入框后按住输入栏下拉”；需要重启、重新登录、清缓存、等部署等条件都写进这一行。TG 的 `/issues` 会把这一行显示给用户，条件变化（如发了新版本）就再发一条带新 `验证方法：` 行的评论，以最新一条为准。然后 `glab issue update <N> --unlabel agent:doing --label agent:to-verify`，并在 TG 用一句话告诉用户“#N 已修好待验证”。**不要自己关闭 issue**，提交信息里用 `Refs #N`，不要写 `Closes #N`（会在合并时绕过用户验证自动关闭）。
 - **评论内容**：issue 对团队可见，评论里不要写服务器本地路径（`/home/...`）、令牌或会话 ID；需要附截图时用 `gitlab-upload <仓库> <文件>` 上传后贴它输出的 markdown。
 - **用户验证**：用户验证通过后由用户（或 issue-desk）关闭；不通过会退回 `agent:todo` 并附说明，重新接手处理。
 - **阻塞**：需要用户决定、或者被阻塞时，改标签为 `agent:blocked` 并评论原因，然后在 TG 告诉用户。
