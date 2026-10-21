@@ -54,8 +54,20 @@ def _load() -> dict:
         return {}
 
 
+LEGACY_CLAUDE_PERMISSIONS = PROJECT_ROOT / ".claude-permissions.json"  # nas 旧版 /model claude full 的存档
+
+
 def get(cwd: str, engine: str) -> dict:
-    return dict(_load().get(str(Path(cwd).resolve()), {}).get(engine, {}))
+    key = str(Path(cwd).resolve())
+    prefs = dict(_load().get(key, {}).get(engine, {}))
+    if engine == "claude" and "permission" not in prefs:
+        try:
+            legacy = json.loads(LEGACY_CLAUDE_PERMISSIONS.read_text()).get(key)
+        except (OSError, ValueError, AttributeError):
+            legacy = None
+        if legacy in CLAUDE_PERMISSIONS:
+            prefs["permission"] = legacy
+    return prefs
 
 
 def update(cwd: str, engine: str, **changes) -> dict:

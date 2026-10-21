@@ -32,7 +32,7 @@ class ClaudeLaunchArgsTests(unittest.TestCase):
     def test_project_bypass_adds_cli_flag(self):
         self.write('settings.json', 'bypassPermissions')
         self.assertEqual(backends.claude_launch_args(str(self.root)),
-                         ['claude', '--dangerously-skip-permissions'])
+                         ['claude', '--dangerously-skip-permissions', '--settings', backends.CLAUDE_FULL_SETTINGS])
 
     def test_local_settings_override_shared_bypass(self):
         self.write('settings.json', 'bypassPermissions')

@@ -1,5 +1,6 @@
 """/model 偏好：解析、存取、落到 Claude / Codex 启动参数；/new 参数校验。无网络、不起 CLI。"""
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,7 +57,17 @@ class LaunchArgsTests(unittest.TestCase):
         model_prefs.update(self.cwd, "claude", model="claude-sonnet-5", effort="high", permission="full")
         self.assertEqual(backends.claude_launch_args(self.cwd, resume_id="sid"),
                          ["claude", "--resume", "sid", "--model", "claude-sonnet-5", "--effort", "high",
-                          "--dangerously-skip-permissions"])
+                          "--dangerously-skip-permissions", "--settings", backends.CLAUDE_FULL_SETTINGS])
+        settings = json.loads(backends.CLAUDE_FULL_SETTINGS)
+        self.assertTrue(settings["skipDangerousModePermissionPrompt"])
+
+    def test_legacy_nas_permission_file_is_honored_until_overridden(self):
+        legacy = Path(self.cwd).parent / "claude-permissions.json"
+        legacy.write_text(json.dumps({str(Path(self.cwd).resolve()): "full"}))
+        with patch.object(model_prefs, "LEGACY_CLAUDE_PERMISSIONS", legacy):
+            self.assertEqual(model_prefs.get(self.cwd, "claude"), {"permission": "full"})
+            model_prefs.update(self.cwd, "claude", permission="default")
+            self.assertEqual(model_prefs.get(self.cwd, "claude")["permission"], "default")
 
     def test_claude_default_permission_overrides_settings_bypass(self):
         (Path(self.cwd) / ".claude").mkdir()

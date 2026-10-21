@@ -252,6 +252,9 @@ async def claude_runtime_mode(pane: str, info: dict) -> str | None:
     return None
 
 
+CLAUDE_FULL_SETTINGS = json.dumps({"sandbox": {"enabled": False}, "skipDangerousModePermissionPrompt": True})
+
+
 def claude_launch_args(cwd: str, resume_id: str | None = None) -> list[str]:
     """/model 偏好优先；未设权限时沿用项目 .claude 设置（settings 里的 bypass 必须靠 CLI 参数才生效）。"""
     from src import model_prefs
@@ -265,7 +268,8 @@ def claude_launch_args(cwd: str, resume_id: str | None = None) -> list[str]:
         args += ["--effort", prefs["effort"]]
     permission = prefs.get("permission") or _claude_settings_permission(cwd)
     if permission == "full":
-        args.append("--dangerously-skip-permissions")
+        # 新机器的全局设置里没有“跳过危险模式确认”，不带这个第一次启动会卡在确认框上
+        args += ["--dangerously-skip-permissions", "--settings", CLAUDE_FULL_SETTINGS]
     return args
 
 
