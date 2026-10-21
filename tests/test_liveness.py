@@ -116,6 +116,13 @@ class MonitorTests(unittest.TestCase):
         self.at(85, snap(state="idle", tokens=""))
         self.assertEqual(self.bot.renamed, ["🟢 demo", "demo"])
 
+    def test_title_not_starved_by_card_budget(self):
+        for _ in range(liveness.BUDGET):
+            self.mon._spend()                                       # 卡片把额度用完了
+        self.at(0, snap())
+        self.at(25, snap(tokens="↓ 2k"))
+        self.assertEqual(self.bot.renamed, ["🟢 demo"])
+
     def test_unknown_topic_name_is_never_touched(self):
         asyncio.run(self.mon.observe(8, snap(), 0, 1000))
         asyncio.run(self.mon.observe(8, snap(tokens="↓ 9k"), 0, 1100))

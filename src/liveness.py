@@ -367,8 +367,9 @@ class Monitor:
         if entry is None:  # 不知道原名的话题（可能被手动改过名）一律不碰，免得冲掉自定义名字
             return
         wanted = titled(entry["base"], topic.state)
+        # 话题名比卡片刷新重要且改得少：不受每分钟额度限制，只在真正限流时暂停
         if wanted == entry["applied"] or now - topic.state_since < TITLE_STABLE \
-                or now - topic.title_applied_at < TITLE_GAP or self._paused():
+                or now - topic.title_applied_at < TITLE_GAP or time.time() < self.paused_until:
             return
         try:
             self._spend()
