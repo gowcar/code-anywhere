@@ -7,6 +7,7 @@ allowed to receive input or publish events for a project.
 import asyncio
 import json
 import os
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -204,6 +205,51 @@ def claude_transcript_offsets(cwd: str) -> dict[str, int]:
         except FileNotFoundError:
             continue
     return offsets
+
+
+async def claude_session(pane: str, cwd: str) -> dict | None:
+    """SessionStart hook 记在 pane 上的会话身份（@ca_claude）；jsonl 尚未生成时也可用，校验不符返回 None。"""
+    try:
+        raw = await command("tmux", "display-message", "-p", "-t", pane, "#{@ca_claude}")
+        info = json.loads(raw) if raw else {}
+        if not isinstance(info, dict):
+            return None
+        sid = info.get("session_id")
+        path = Path(info.get("transcript_path") or "")
+        if (not sid or not path.is_absolute() or path.name != f"{sid}.jsonl"
+                or not info.get("cwd") or Path(info["cwd"]).resolve() != Path(cwd).resolve()):
+            return None
+        return info
+    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+        return None
+
+
+async def remember_claude(pane: str, info: dict) -> None:
+    metadata = {key: info.get(key, "") for key in ("session_id", "cwd", "transcript_path", "model", "permission_mode")}
+    await command("tmux", "set-option", "-p", "-t", pane, "@ca_claude", json.dumps(metadata, ensure_ascii=False))
+
+
+def claude_permission_mode(info: dict) -> str | None:
+    native = info.get("permission_mode")
+    if native in {"bypassPermissions", "full"}:
+        return "full"
+    return "default" if native else None
+
+
+async def claude_runtime_mode(pane: str, info: dict) -> str | None:
+    """部分 CLI 版本的 SessionStart 不带权限模式：看 pane 里真实 claude 进程的启动参数。"""
+    if info.get("permission_mode"):
+        return info["permission_mode"]
+    for pid in await pane_processes(pane, "claude"):
+        try:
+            args = shlex.split(await command("ps", "-p", pid, "-o", "command="))
+            if "--dangerously-skip-permissions" in args:
+                return "bypassPermissions"
+            if "--permission-mode" in args:
+                return args[args.index("--permission-mode") + 1]
+        except (OSError, RuntimeError, ValueError, IndexError, asyncio.TimeoutError):
+            continue
+    return None
 
 
 def claude_launch_args(cwd: str, resume_id: str | None = None) -> list[str]:

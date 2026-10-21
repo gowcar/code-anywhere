@@ -34,6 +34,13 @@ if _tmux_pane and _cwd:
             check=False, timeout=2,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        # 会话身份记在 pane 上：桥接离线或 jsonl 尚未生成时，恢复流程也能找到准确会话
+        metadata = {key: data.get(key, "") for key in ("session_id", "cwd", "transcript_path", "model", "permission_mode")}
+        subprocess.run(
+            ["tmux", "set", "-p", "-t", _tmux_pane, "@ca_claude", json.dumps(metadata)],
+            check=False, timeout=2,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     except Exception:
         pass
 
@@ -43,6 +50,7 @@ post_to_bot("/session_start", {
     "source": data.get("source"),
     "model": data.get("model", ""),
     "transcript_path": data.get("transcript_path"),
+    "permission_mode": data.get("permission_mode"),
     "tmux_pane": os.environ.get("TMUX_PANE", ""),
 }, timeout=5)
 

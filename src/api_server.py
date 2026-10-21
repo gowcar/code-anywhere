@@ -325,6 +325,22 @@ def retire_project_watchers(cwd: str, backend: str, keep_sid: str | None = None)
         terminal_sessions.pop(sid, None)
 
 
+async def _claude_identity(pane_id: str, cwd: str) -> dict | None:
+    info = await backends.claude_session(pane_id, cwd)
+    if info:
+        return info
+    # 钩子标签上线前启动的终端：沿用内存里钩子登记过的会话，并补写标签
+    info = next(({**v, "session_id": key} for key, v in terminal_sessions.items()
+                 if v.get("cwd") == cwd and v.get("tmux_pane") == pane_id
+                 and v.get("backend", "claude") == "claude" and v.get("transcript_path")), None)
+    if info:
+        try:
+            await backends.remember_claude(pane_id, info)
+        except Exception:
+            log.warning("[register_pane] 补写 pane 会话标签失败 pane=%s", pane_id, exc_info=True)
+    return info
+
+
 async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str, int] | None = None,
                                 resume_saved: bool = False) -> bool:
     if not _bot or not config.CHAT_ID:
@@ -337,13 +353,17 @@ async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str,
         return False
     latest = None
     sid = None
+    claude_info = None
     for _ in range(10):
         if backend == "codex":
             found = await backends.codex_transcript(pane_id, cwd)
             if found:
                 sid, path = found
                 latest = Path(path)
-        else:
+        elif claude_info := await _claude_identity(pane_id, cwd):
+            # 钩子给出的准确身份优先：jsonl 还没生成、或同项目有更新的旧会话时都不会认错
+            sid, latest = claude_info["session_id"], Path(claude_info["transcript_path"])
+        else:  # 兼容没有 pane 标签的老终端：按日志文件推断
             proj_path = projects.claude_dir(cwd)
             files = list(proj_path.glob("*.jsonl")) if proj_path else []
             if start_offsets is not None:
@@ -378,6 +398,10 @@ async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str,
                         permission_mode = backends.normalize_codex(ev).get("permission_mode")
                 except ValueError:
                     continue
+    if claude_info:
+        model = claude_info.get("model", "")
+        permission_mode = backends.claude_permission_mode(
+            {"permission_mode": await backends.claude_runtime_mode(pane_id, claude_info)})
     if backend == "codex":
         # A restart's launch flags take effect before the next turn_context exists.
         tagged_mode = await backends.command("tmux", "display-message", "-p", "-t", pane_id, "#{@ca_permission}")
@@ -393,7 +417,7 @@ async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str,
     if old:
         old.cancel()
     # Establish byte offset NOW, before callers can inject the first message.
-    file_size = latest.stat().st_size
+    file_size = latest.stat().st_size if latest.exists() else 0
     start_pos = file_size if start_offsets is None else min(
         start_offsets.get(str(latest.resolve()), 0), file_size)
     if resume_saved and start_offsets is None:
@@ -439,6 +463,14 @@ async def handle_session_start(request: web.Request) -> web.Response:
     if backends.get_backend(cwd) != "claude":
         return web.json_response({"ok": True, "ignored": "inactive backend"})
     retire_project_watchers(cwd, "claude", keep_sid=session_id)
+    # resume 时部分 CLI 版本的 hook 不带模型和权限：模型沿用原登记，权限看进程启动参数
+    model = model or terminal_sessions.get(session_id, {}).get("model", "")
+    data["model"] = model
+    data["permission_mode"] = await backends.claude_runtime_mode(tmux_pane, data)
+    try:
+        await backends.remember_claude(tmux_pane, data)
+    except Exception:
+        log.warning("[session_start] 写 pane 会话标签失败: %s", tmux_pane, exc_info=True)
 
     # 记录终端会话
     terminal_sessions[session_id] = {
@@ -447,6 +479,8 @@ async def handle_session_start(request: web.Request) -> web.Response:
         "cwd": cwd,
         "tmux_pane": tmux_pane,
         "model": model,
+        "backend": "claude",
+        "permission_mode": backends.claude_permission_mode(data),
         "transcript_path": transcript_path,
     }
 
@@ -458,8 +492,11 @@ async def handle_session_start(request: web.Request) -> web.Response:
         old_task = _watchers.pop(session_id, None)
         if old_task:
             old_task.cancel()
+        # 起点在登记时就定下：等 watcher 首次运行再取文件大小，会跳过这期间写入的首条回复
+        path = Path(transcript_path)
         _watchers[session_id] = asyncio.create_task(
-            _watch_transcript(session_id, transcript_path, topic_id, config.CHAT_ID)
+            _watch_transcript(session_id, transcript_path, topic_id, config.CHAT_ID,
+                              start_pos=path.stat().st_size if path.exists() else 0)
         )
 
     return web.json_response({"ok": True})
