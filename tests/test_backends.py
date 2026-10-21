@@ -203,7 +203,9 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
                         patch.object(api_server, '_bot', SimpleNamespace(send_message=AsyncMock())),
                         patch.object(api_server, 'terminal_sessions', {}),
                         patch.object(api_server, '_watchers', {}),
-                        patch.object(api_server, '_event_replay', defaultdict(lambda: deque(maxlen=200)))]
+                        patch.object(api_server, '_event_replay', defaultdict(lambda: deque(maxlen=200))),
+                        patch('src.model_prefs.PREFS_FILE', Path(self.temp.name) / 'prefs.json'),
+                        patch('src.model_prefs.codex_models', return_value=[])]
         for p in self.patches: p.start(); self.addCleanup(p.stop)
 
     async def test_actual_rollout_bound_by_pid_and_cwd(self):
@@ -341,7 +343,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backends.get_backend(cwd), 'codex')
         command.assert_awaited_once_with('tmux', 'send-keys', '-t', '%old', 'Escape')
         register.assert_awaited_once_with('%new', cwd)
-        self.assertIn('GPT / Codex', message.reply_text.call_args.args[0])
+        self.assertIn('引擎：Codex', message.reply_text.call_args.args[0])
 
     async def test_web_rejects_inactive_backend(self):
         cwd = self.temp.name; backends.set_backend(cwd, 'codex')

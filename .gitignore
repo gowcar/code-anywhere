@@ -56,3 +56,7 @@ logs/*.json
 # Watcher resume positions
 .watch-offsets.json
 .watch-offsets.tmp
+
+# /model per-project preferences
+.model-prefs.json
+.model-prefs.tmp

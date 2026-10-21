@@ -15,7 +15,9 @@ class PermissionTests(unittest.IsolatedAsyncioTestCase):
         patches = [patch.object(permissions, 'PERMISSIONS_FILE', Path(self.cwd) / 'permissions.json'),
                    patch.object(backends, 'PREFERENCES_FILE', Path(self.cwd) / 'backends.json'),
                    patch.object(backends, 'SESSIONS_FILE', Path(self.cwd) / 'sessions.json'),
-                   patch.object(api_server, 'terminal_sessions', {})]
+                   patch.object(api_server, 'terminal_sessions', {}),
+                   patch('src.model_prefs.PREFS_FILE', Path(self.cwd) / 'prefs.json'),
+                   patch('src.model_prefs.codex_models', return_value=[])]
         for p in patches: p.start(); self.addCleanup(p.stop)
         self.message = SimpleNamespace(chat_id=34, message_thread_id=12, reply_text=AsyncMock())
         self.update = SimpleNamespace(effective_user=SimpleNamespace(id=77), message=self.message)
@@ -46,9 +48,11 @@ class PermissionTests(unittest.IsolatedAsyncioTestCase):
         backends.set_backend(self.cwd, 'codex')
         with patch.object(bot, 'auth_check', return_value=True), \
              patch.object(bot, '_update_cwd', return_value=self.cwd), \
-             patch.object(permissions, 'apply_mode', AsyncMock(return_value='%1')) as apply:
+             patch.object(bot, '_find_pane_for_project', AsyncMock(return_value='%1')), \
+             patch('src.model_switch.restart', AsyncMock(return_value='已重启终端并接回原会话。')) as restart:
             await bot.cmd_model(self.update, SimpleNamespace(args=['codex', 'full']))
-        apply.assert_awaited_once_with(self.cwd, 'full', 34, 12)
+        self.assertEqual(permissions.get_mode(self.cwd), 'full')
+        restart.assert_awaited_once_with(self.cwd, 12)
         self.assertIn('Full', self.message.reply_text.call_args.args[0])
 
     async def test_invalid_model_mode_does_not_change_backend(self):

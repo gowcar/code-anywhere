@@ -94,62 +94,138 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ /model ============
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/model 查看 · /model list · /model [claude|codex] [模型] [effort] [权限]（顺序不限，未写的不变）"""
     if not auth_check(update.effective_user.id):
         return
     cwd = _update_cwd(update)
     if not cwd:
         await update.message.reply_text("请在已绑定的项目话题内使用 /model")
         return
+    from src import model_prefs, permissions
     args = context.args or []
-    backend = {"gpt": "codex"}.get(args[0].lower(), args[0].lower()) if args else None
-    from src import permissions
-    mode = args[1].lower() if len(args) == 2 else None
-    if (len(args) > 2 or (backend and backend not in {"claude", "codex"})
-            or (mode and (backend != "codex" or mode not in permissions.MODES))):
-        await update.message.reply_text("用法：/model codex [full|workspace|read-only] 或 /model claude；/model 查看状态。")
+    topic_id = update.message.message_thread_id or update.message.chat_id
+    if args and args[0].lower() in {"list", "ls", "列表"}:
+        catalog = await asyncio.to_thread(model_prefs.codex_models)
+        await update.message.reply_text(model_prefs.format_list(catalog), parse_mode="HTML")
         return
+    if not args:
+        await update.message.reply_text(_model_status(cwd), parse_mode="HTML")
+        return
+    catalog = await asyncio.to_thread(model_prefs.codex_models)
     async with _project_locks.setdefault(cwd, asyncio.Lock()):
-        if backend:
-            previous = backends.get_backend(cwd)
-            if previous != backend:
-                old_pane = await _find_pane_for_project(cwd)
-                if old_pane:
-                    # Escape interrupts the old turn/retry without exiting its CLI.
-                    await backends.command("tmux", "send-keys", "-t", old_pane, "Escape")
-            backends.set_backend(cwd, backend)
+        current = backends.get_backend(cwd)
+        try:
+            req = model_prefs.parse(args, current, catalog)
+            target = req.engine or current
+            if target == "codex" and req.effort and not req.model:
+                # 没指定模型时，按项目将使用的模型校验 effort
+                slug = model_prefs.get(cwd, "codex").get("model") or _running_model(cwd, "codex")
+                efforts = next((m["efforts"] for m in catalog if m["slug"] == slug), None)
+                if efforts and req.effort not in efforts:
+                    raise ValueError(f"{slug} 不支持 effort「{req.effort}」，可选：{' / '.join(efforts)}")
+        except ValueError as exc:
+            await update.message.reply_text(f"⚠️ {exc}")
+            return
+        if target != current:
+            old_pane = await _find_pane_for_project(cwd)
+            if old_pane:
+                await backends.command("tmux", "send-keys", "-t", old_pane, "Escape")
+            backends.set_backend(cwd, target)
             from src.api_server import retire_project_watchers
-            retire_project_watchers(cwd, backend)
-            stop_typing(update.message.message_thread_id or update.message.chat_id)
-            if mode:
-                await update.message.reply_text("正在切换权限，当前回合会中断，随后恢复原会话。")
-                try:
-                    await permissions.apply_mode(cwd, mode, update.message.chat_id,
-                                                 update.message.message_thread_id or update.message.chat_id)
-                except Exception as exc:
-                    log.exception("[permissions] switch failed project=%s", cwd)
-                    await update.message.reply_text(f"⚠️ 权限切换未完成：{exc}")
-                    return
-            else:
-                pane = await _find_pane_for_project(cwd)
-                if pane:
-                    from src.api_server import register_pane_watcher
-                    await register_pane_watcher(pane, cwd)
-        selected = backends.get_backend(cwd)
-        from src.api_server import terminal_sessions
-        current = next((v for v in terminal_sessions.values()
-                        if v.get("cwd") == cwd and v.get("backend", "claude") == selected), {})
-        model = current.get("model") or (os.getenv("CODEX_MODEL") if selected == "codex" else "")
-        description = "GPT / Codex" if selected == "codex" else "Claude"
-        permission_text = ("\n权限：" + permissions.LABELS.get(
-            mode or current.get("permission_mode"), "未观测（配置为 " + permissions.LABELS[permissions.get_mode(cwd)] + "）")
-            if selected == "codex" else "")
+            retire_project_watchers(cwd, target)
+            stop_typing(topic_id)
+        changed = any((req.model, req.effort, req.permission))
+        if target == "codex":
+            model_prefs.update(cwd, "codex", model=req.model, effort=req.effort)
+            if req.permission:
+                permissions.set_mode(cwd, req.permission)
+        else:
+            model_prefs.update(cwd, "claude", model=req.model, effort=req.effort, permission=req.permission)
+        note = ""
+        pane = await _find_pane_for_project(cwd)
+        if changed and pane:
+            await update.message.reply_text("正在按新设置重启终端，当前回合会中断，随后接回原会话…")
+            try:
+                from src import model_switch
+                note = await model_switch.restart(cwd, topic_id)
+            except Exception as exc:
+                log.exception("[model] restart failed project=%s", cwd)
+                note = f"⚠️ 设置已保存，但重启未完成：{exc}"
+        elif pane:
+            from src.api_server import register_pane_watcher
+            await register_pane_watcher(pane, cwd)
+        else:
+            note = "下一条消息启动终端时生效。"
+    await update.message.reply_text(_model_status(cwd) + (f"\n\n{note}" if note else ""), parse_mode="HTML")
+
+
+def _running_model(cwd: str, engine: str) -> str:
+    from src.api_server import terminal_sessions
+    return next((v.get("model") or "" for v in terminal_sessions.values()
+                 if v.get("cwd") == cwd and v.get("backend", "claude") == engine), "")
+
+
+def _model_status(cwd: str) -> str:
+    from src import model_prefs, permissions
+    engine = backends.get_backend(cwd)
+    prefs = model_prefs.get(cwd, engine)
+    if engine == "codex":
+        model = prefs.get("model") or _running_model(cwd, "codex") or os.getenv("CODEX_MODEL") or "Codex 配置默认"
+        perm = permissions.LABELS[permissions.get_mode(cwd)]
+    else:
+        model = next((n for _, mid, n in model_prefs.CLAUDE_MODELS if mid == prefs.get("model")), None) \
+            or prefs.get("model") or _running_model(cwd, "claude") or "Claude 配置默认"
+        perm_key = prefs.get("permission") or backends._claude_settings_permission(cwd) or "default"
+        perm = model_prefs.CLAUDE_PERMISSIONS[perm_key]
+    return (f"<b>{html_lib.escape(Path(cwd).name)}</b>\n"
+            f"引擎：{'Codex' if engine == 'codex' else 'Claude'}\n"
+            f"模型：{html_lib.escape(model)}\n"
+            f"effort：{prefs.get('effort') or '默认'}\n"
+            f"权限：{perm}\n\n"
+            "切换示例：<code>/model claude sonnet high</code>　<code>/model gpt-6-sol xhigh full</code>\n"
+            "全部选项：<code>/model list</code>")
+
+
+WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "workspace")))
+
+
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/new <名字> [claude|codex]：建目录 + 建话题 + 启动 CLI，全程不用登录服务器。"""
+    if not auth_check(update.effective_user.id):
+        return
+    import re
+    args = context.args or []
+    engine = {"gpt": "codex"}.get(args[1].lower(), args[1].lower()) if len(args) > 1 else "claude"
+    if not args or len(args) > 2 or engine not in {"claude", "codex"} \
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", args[0]):
         await update.message.reply_text(
-            f"{Path(cwd).name}：{description}"
-            + (f" · {model}" if model else "（使用本机 CLI 配置的模型）")
-            + permission_text
-            + "\n直接发消息继续。切换：/model codex full 或 /model claude"
-            + ("\nClaude/Codex 各自保留历史；跨引擎通过项目文件和 recon 接续。" if backend else "")
-        )
+            f"用法：/new <名字> [claude|codex]\n名字只能用字母、数字、. _ -，目录建在 {WORKSPACE_ROOT}/ 下。")
+        return
+    chat_id = update.effective_chat.id
+    path = (WORKSPACE_ROOT / args[0]).resolve()
+    link = lambda tid: f"https://t.me/c/{str(chat_id).removeprefix('-100')}/{tid}"
+    if existing := projects.get_topic(str(path)):
+        await update.message.reply_text(f"项目已存在：{link(existing)}")
+        return
+    created = not path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    topic = await context.bot.create_forum_topic(chat_id=chat_id, name=args[0])
+    tid = topic.message_thread_id
+    projects.bind(tid, str(path))
+    state.set_cwd(tid, str(path))
+    backends.set_backend(str(path), engine)
+    log.info(f"[new] {path} → topic {tid} engine={engine} created={created}")
+    await context.bot.send_message(
+        chat_id=chat_id, message_thread_id=tid,
+        text=f"✅ 新项目 {args[0]}\n目录：{path}{'（新建）' if created else '（已有目录）'}\n"
+             f"引擎：{'Codex' if engine == 'codex' else 'Claude'}，正在启动…\n\n"
+             "直接在这里说话开始。/model 切换模型、effort 和权限。")
+    async with _project_locks.setdefault(str(path), asyncio.Lock()):
+        pane = await _ensure_pane_for_project(str(path), chat_id, tid)
+    await context.bot.send_message(chat_id=chat_id, message_thread_id=tid,
+                                   text="🟢 终端已就绪" if pane else "⚠️ 终端启动失败，发第一条消息时会再试一次")
+    if update.message.message_thread_id != tid:
+        await update.message.reply_text(f"已创建：{link(tid)}")
 
 
 async def cmd_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -560,15 +636,7 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     # 关键：tmux server env 通常无 CLAUDE_CODE_OAUTH_TOKEN，claude 会秒退 → 用 -e 从当前进程 env 显式传
     backend = backends.get_backend(cwd)
     proj_name = Path(norm_cwd).name + ("-codex" if backend == "codex" else "")
-    import os as _os
-    tmux_env_args: list[str] = []
-    env_keys = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}
-    if backend == "codex":
-        env_keys.update(backends.codex_env_keys())
-    for env_key in sorted(env_keys):
-        v = _os.environ.get(env_key)
-        if v:
-            tmux_env_args += ["-e", f"{env_key}={v}"]
+    tmux_env_args = backends.launch_env_args(backend)
     try:
         proc = await asyncio.create_subprocess_exec(
             "tmux", "new-window", "-t", tmux_session, "-c", norm_cwd, "-n", proj_name,
@@ -1265,8 +1333,9 @@ def create_app() -> Application:
 
     async def post_init(application):
         await application.bot.set_my_commands([
-            BotCommand("model", "切换模型：codex full / claude"),
+            BotCommand("model", "模型 / effort / 权限：/model list 查看全部"),
             BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
+            BotCommand("new", "新建项目：/new 名字 [claude|codex]"),
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
             BotCommand("status", "活跃会话"),
@@ -1300,6 +1369,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("issues", cmd_issues))
+    app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     # 文本消息

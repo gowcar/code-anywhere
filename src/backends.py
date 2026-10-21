@@ -179,9 +179,13 @@ def codex_launch_args(cwd: str, resume_id: str | None = None, model: str | None 
             "-c", "check_for_update_on_startup=false"]
     if mode == "workspace":
         args += ["-c", "sandbox_workspace_write.network_access=true"]
-    model = model or os.getenv("CODEX_MODEL")
+    from src import model_prefs
+    prefs = model_prefs.get(cwd, "codex")
+    model = prefs.get("model") or model or os.getenv("CODEX_MODEL")
     if model:
         args += ["-m", model]
+    if prefs.get("effort"):
+        args += ["-c", f'model_reasoning_effort="{prefs["effort"]}"']
     if not resume_id and SESSIONS_FILE.exists():
         resume_id = json.loads(SESSIONS_FILE.read_text()).get(str(Path(cwd).resolve()))
     if resume_id:
@@ -202,9 +206,24 @@ def claude_transcript_offsets(cwd: str) -> dict[str, int]:
     return offsets
 
 
-def claude_launch_args(cwd: str) -> list[str]:
-    """Claude ignores settings-only bypassPermissions; honor it with the CLI flag."""
+def claude_launch_args(cwd: str, resume_id: str | None = None) -> list[str]:
+    """/model 偏好优先；未设权限时沿用项目 .claude 设置（settings 里的 bypass 必须靠 CLI 参数才生效）。"""
+    from src import model_prefs
+    prefs = model_prefs.get(cwd, "claude")
     args = ["claude"]
+    if resume_id:
+        args += ["--resume", resume_id]
+    if prefs.get("model"):
+        args += ["--model", prefs["model"]]
+    if prefs.get("effort"):
+        args += ["--effort", prefs["effort"]]
+    permission = prefs.get("permission") or _claude_settings_permission(cwd)
+    if permission == "full":
+        args.append("--dangerously-skip-permissions")
+    return args
+
+
+def _claude_settings_permission(cwd: str) -> str | None:
     claude_dir = Path(cwd).resolve() / ".claude"
     for name in ("settings.local.json", "settings.json"):
         try:
@@ -212,9 +231,19 @@ def claude_launch_args(cwd: str) -> list[str]:
         except (OSError, ValueError, AttributeError):
             continue
         if mode:
-            if mode == "bypassPermissions":
-                args.append("--dangerously-skip-permissions")
-            break
+            return "full" if mode == "bypassPermissions" else "default"
+    return None
+
+
+def launch_env_args(backend: str) -> list[str]:
+    """tmux 服务端环境里通常没有凭据，拉起 CLI 时用 -e 显式传入。"""
+    keys = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}
+    if backend == "codex":
+        keys.update(codex_env_keys())
+    args = []
+    for key in sorted(keys):
+        if value := os.environ.get(key):
+            args += ["-e", f"{key}={value}"]
     return args
 
 
