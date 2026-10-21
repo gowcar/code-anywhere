@@ -2,3 +2,4 @@ python-telegram-bot[socks]>=22.0
 python-dotenv>=1.0
 aiohttp>=3.9
 mistune>=3.0
+Pillow>=10

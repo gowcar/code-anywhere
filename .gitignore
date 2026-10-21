@@ -60,3 +60,7 @@ logs/*.json
 # /model per-project preferences
 .model-prefs.json
 .model-prefs.tmp
+
+# Topic original names for status emoji
+.topic-names.json
+.topic-names.tmp

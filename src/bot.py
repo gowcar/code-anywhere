@@ -212,6 +212,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = await context.bot.create_forum_topic(chat_id=chat_id, name=args[0])
     tid = topic.message_thread_id
     projects.bind(tid, str(path))
+    from src import liveness
+    liveness.remember_topic_name(tid, args[0])
     state.set_cwd(tid, str(path))
     backends.set_backend(str(path), engine)
     log.info(f"[new] {path} → topic {tid} engine={engine} created={created}")
@@ -237,16 +239,26 @@ async def cmd_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请在已绑定的项目话题内使用 /abort")
         return
     message = update.message
-    topic_id = message.message_thread_id or message.chat_id
-    albums = [k for k in _media_groups if k[0] == message.chat_id and k[1] == message.message_thread_id]
+    text = await _abort_project(context.bot, cwd, message.chat_id, message.message_thread_id)
+    await message.reply_text(text, parse_mode=None)
+
+
+async def _abort_project(bot, cwd: str, chat_id: int, thread_id: int | None) -> str:
+    topic_id = thread_id or chat_id
+    albums = [k for k in _media_groups if k[0] == chat_id and k[1] == thread_id]
     for key in albums:
         _media_groups.pop(key, None)
-    from src import abort
+    from src import abort, liveness
     async with _project_locks.setdefault(cwd, asyncio.Lock()):
         backend = backends.get_backend(cwd)
         pane = await _find_pane_for_project(cwd)
         running, dropped = (await abort.abort(pane, backend)) if pane else (False, "")
     stop_typing(topic_id)
+    if (card := liveness.note_abort(topic_id)) and running:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=card, text="⏹ 已中断")
+        except Exception:
+            pass
     log.info("[abort] %s pane=%s running=%s dropped=%s albums=%s", Path(cwd).name, pane, running, bool(dropped), len(albums))
     lines = ["⏹ 已中断当前回合" if running else "当前没有正在运行的回合"]
     if dropped:
@@ -256,7 +268,7 @@ async def cmd_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"已丢弃 {len(albums)} 组还在接收中的相册")
     if not running and not dropped and not albums:
         lines.append("没有需要丢弃的排队消息")
-    await message.reply_text("\n".join(lines), parse_mode=None)
+    return "\n".join(lines)
 
 
 async def cmd_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -437,6 +449,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = query.data
     chat_id = query.message.chat_id
+
+    if data.startswith("lv:"):  # 状态告警按钮：看终端 / 中断
+        _, action, topic = data.split(":", 2)
+        cwd = projects.get_path(int(topic))
+        await query.answer()
+        if not cwd:
+            await query.message.reply_text("这个话题已经没有绑定项目了")
+            return
+        if action == "abort":
+            text = await _abort_project(context.bot, cwd, chat_id, int(topic))
+            await query.message.reply_text(text, parse_mode=None)
+            return
+        pane = await _find_pane_for_project(cwd)
+        if not pane:
+            await query.message.reply_text("终端已经关闭")
+            return
+        try:  # 画成图片：保留终端原来的排版和颜色，手机上可放大看
+            from src import term_image
+            ansi = await backends.command("tmux", "capture-pane", "-e", "-p", "-t", pane)
+            png = await asyncio.to_thread(term_image.render, ansi)
+            await query.message.reply_photo(photo=png, caption=f"{Path(cwd).name} 终端（{datetime.now():%H:%M:%S}）")
+        except Exception as exc:
+            log.warning("[liveness] 终端截图失败，改发文本: %s", exc)
+            from src import liveness
+            await query.message.reply_text(liveness.screen_excerpt(await _capture_pane(pane)), parse_mode="HTML")
+        return
 
     # 权限审批：先唤醒等待中的请求（最关键），再做 UI 反馈
     if data.startswith("pa:") or data.startswith("pd:"):
@@ -1013,6 +1051,9 @@ def _update_cwd(update: Update) -> str | None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    if message and message.message_thread_id:
+        from src import liveness
+        liveness.note_activity(message.message_thread_id)
     group = getattr(message, "media_group_id", None)
     cwd = _update_cwd(update)
     if group and cwd and auth_check(update.effective_user.id):
@@ -1340,6 +1381,8 @@ async def sync_all_projects(bot, chat_id: int):
             topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
             projects.bind(topic.message_thread_id, p["path"])
             state.set_cwd(topic.message_thread_id, p["path"])
+            from src import liveness
+            liveness.remember_topic_name(topic.message_thread_id, topic_name)
             # 发送欢迎消息 + 历史会话列表
             await _send_topic_welcome(bot, chat_id, topic.message_thread_id, topic_name, p["path"])
             bound_names[p["name"]] = name_count + 1
@@ -1363,6 +1406,16 @@ async def sync_all_projects(bot, chat_id: int):
                 log.warning(f"[sync] {p['name']} 重试也失败: {e2}")
         except Exception as e:
             log.warning(f"[sync] {p['name']} 创建话题失败: {e}")
+
+
+async def _drop_own_topic_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """状态符号改话题名时 TG 会插一条“修改了话题名称”的系统消息，删掉免得刷屏。"""
+    message = update.effective_message
+    if message and message.from_user and message.from_user.id == context.bot.id:
+        try:
+            await message.delete()
+        except Exception as exc:
+            log.debug("[liveness] 删除改名系统消息失败: %s", exc)
 
 
 def create_app() -> Application:
@@ -1424,6 +1477,9 @@ def create_app() -> Application:
                     await _recover_active_sessions()
 
         asyncio.create_task(periodic_sync())
+        if config.CHAT_ID:
+            from src import liveness
+            asyncio.create_task(liveness.Monitor(application.bot, config.CHAT_ID).run())
     app.post_init = post_init
 
     app.add_handler(CommandHandler("model", cmd_model))
@@ -1437,6 +1493,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("abort", cmd_abort))
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_EDITED, _drop_own_topic_edit))
     # 文本消息
     app.add_handler(
         MessageHandler(

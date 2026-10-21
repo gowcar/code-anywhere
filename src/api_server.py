@@ -27,6 +27,7 @@ from aiohttp import web
 
 from src.config import BOT_PORT
 from src import backends
+from src import liveness
 from src import projects
 from src import state
 import src.config as config
@@ -552,6 +553,21 @@ async def stop_watchers() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _tg_send(**kwargs):
+    """正式回复的发送：遇到 TG 限流按要求等待后重发，不丢消息（同一会话按顺序处理，只是晚到）。"""
+    from telegram.error import RetryAfter
+    for attempt in range(4):
+        try:
+            return await _bot.send_message(**kwargs)
+        except RetryAfter as exc:
+            wait = exc.retry_after.total_seconds() if hasattr(exc.retry_after, "total_seconds") else float(exc.retry_after)
+            liveness.note_flood(wait)  # 状态卡同时让路
+            if attempt == 3:
+                raise
+            log.warning("[watcher] TG 限流，%.0f 秒后重发（第 %s 次）", wait, attempt + 1)
+            await asyncio.sleep(wait + 1)
+
+
 async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int, start_pos: int | None = None):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import base64 as _b64
@@ -809,9 +825,10 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             # 来源是 TG → TG 端已有用户气泡，skip 避免重复
                             # 来源是 web/终端真人 → 在 TG 永久显示 👤，保证 3 端历史一致
                             if _is_human and not _consume_tg_input(topic_id, text):
+                                liveness.note_activity(topic_id)
                                 try:
                                     for chunk in split_user_message(text):
-                                        await _bot.send_message(
+                                        await _tg_send(
                                             chat_id=chat_id,
                                             message_thread_id=topic_id,
                                             text=chunk,
@@ -826,6 +843,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             if block.get("type") == "text":
                                 text = block.get("text", "").strip()
                                 if text:
+                                    liveness.note_activity(topic_id)  # 状态卡之后有了正式回复
                                     if backend == "codex":
                                         from src.image_delivery import send_linked_images
                                         await send_linked_images(
@@ -852,17 +870,17 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                             send_kwargs["reply_to_message_id"] = reply_to
                                             reply_to = None  # 只用一次
                                         try:
-                                            await _bot.send_message(**send_kwargs)
+                                            await _tg_send(**send_kwargs)
                                         except Exception as e:
                                             log.warning(f"[watcher] HTML 发送失败: {e}")
                                             from telegram.error import BadRequest
                                             if isinstance(e, BadRequest):
                                                 fb = {**send_kwargs, "text": f"✦ {raw}"}
                                                 fb.pop("parse_mode", None)
-                                                await _bot.send_message(**fb)
+                                                await _tg_send(**fb)
                                             else:
                                                 try:
-                                                    await _bot.send_message(
+                                                    await _tg_send(
                                                         **send_kwargs,
                                                         read_timeout=30,
                                                         connect_timeout=15,
@@ -870,7 +888,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                                 except Exception:
                                                     fb = {**send_kwargs, "text": f"✦ {raw}"}
                                                     fb.pop("parse_mode", None)
-                                                    await _bot.send_message(**fb)
+                                                    await _tg_send(**fb)
                             elif block.get("type") == "tool_use":
                                 tname = block.get("name", "?")
                                 tinput = block.get("input", {}) or {}
@@ -893,11 +911,12 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                     if abs_p:
                                         tool_use_image_paths[tid] = abs_p
                                 desc = format_tool_use(tname, tinput)
-                                await send_ephemeral(
-                                    _bot, chat_id,
-                                    desc,
-                                    message_thread_id=topic_id,
-                                )
+                                if not await liveness.on_tool(topic_id, desc):  # 进状态卡滚动显示
+                                    await send_ephemeral(
+                                        _bot, chat_id,
+                                        desc,
+                                        message_thread_id=topic_id,
+                                    )
                 except Exception as e:
                     log.error(f"[watcher] TG 发送失败: {e}", exc_info=True)
 
