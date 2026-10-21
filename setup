@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# code-anywhere 一键安装 / 自检：./setup（交互）  ./setup --check（只检查）
+set -euo pipefail
+cd "$(dirname "$0")"
+PY=$(command -v python3 || true)
+if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
+  echo "需要 Python 3.10+（Ubuntu: sudo apt-get install -y python3；macOS: brew install python）" >&2
+  exit 1
+fi
+exec "$PY" provision/setup.py "$@"

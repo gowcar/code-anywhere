@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""
+tmux-tui — a small, dependency-free TUI for managing tmux *sessions*.
+
+Sessions only: no windows, no panes. List, create, rename, label, kill, attach.
+Driven by the `t` fish function.
+"""
+
+import curses
+import locale
+import os
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+
+SEP = "\x1f"
+FIELDS = ("session_id", "session_name", "session_windows", "session_created",
+          "session_activity", "session_attached", "@label")
+
+# 底部提示栏：键位亮白加粗，括号与说明暗灰
+KEYHINTS = (("↵", "attach"), ("n", "new"), ("r", "rename"), ("l", "label"),
+            ("d", "kill"), ("/", "filter"), ("?", "help"), ("q", "quit"))
+
+
+# ---------------------------------------------------------------- tmux plumbing
+
+def tmux(*args):
+    try:
+        return subprocess.run(("tmux",) + args, capture_output=True, text=True)
+    except FileNotFoundError:
+        sys.exit("tmux-tui: tmux not found in PATH")
+
+
+def list_sessions():
+    fmt = SEP.join("#{%s}" % f for f in FIELDS)
+    r = tmux("list-sessions", "-F", fmt)
+    if r.returncode != 0:          # no server running yet
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        # Older Linux tmux escapes the control separator as literal \037.
+        # Accept both formats; labels occupy the final field.
+        p = line.replace(r"\037", SEP).split(SEP, len(FIELDS) - 1)
+        p += [""] * (len(FIELDS) - len(p))
+        out.append({
+            "id": p[0],
+            "name": p[1],
+            "windows": int(p[2] or 0),
+            "created": int(p[3] or 0),
+            # Older tmux versions or a just-created session may not report an
+            # activity timestamp yet; its creation time is the sensible fallback.
+            "activity": int(p[4] or p[3] or 0),
+            "attached": p[5] not in ("", "0"),
+            "label": p[6],
+        })
+    out.sort(key=lambda s: s["name"].lower())
+    return out
+
+
+def current_session():
+    if not os.environ.get("TMUX"):
+        return None
+    r = tmux("display-message", "-p", "#{session_name}")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def sanitize(name):
+    """tmux session names may not contain '.' or ':'."""
+    name = name.strip()
+    return re.sub(r"[.:]", "-", name)
+
+
+def handoff(session):
+    """Leave curses and hand the terminal over to tmux. Does not return."""
+    curses.endwin()
+    sys.stdout.flush()
+    if os.environ.get("TMUX"):
+        os.execvp("tmux", ["tmux", "switch-client", "-t", "=" + session])
+    else:
+        os.execvp("tmux", ["tmux", "attach-session", "-t", "=" + session])
+
+
+# ---------------------------------------------------------------- text helpers
+
+def dwidth(s):
+    """Display width, accounting for CJK wide characters."""
+    w = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def fit(s, n):
+    """Truncate to n display columns, padded out to exactly n."""
+    if n <= 0:
+        return ""
+    if dwidth(s) <= n:
+        return s + " " * (n - dwidth(s))
+    out, w = "", 0
+    for ch in s:
+        cw = 0 if unicodedata.combining(ch) else (
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        if w + cw > n - 1:
+            break
+        out += ch
+        w += cw
+    return out + "…" + " " * (n - w - 1)
+
+
+def ago(ts):
+    if not ts:
+        return ""
+    d = max(0, time.time() - ts)
+    if d < 60:
+        return "%ds ago" % int(d)
+    if d < 3600:
+        return "%dm ago" % int(d // 60)
+    if d < 86400:
+        return "%dh ago" % int(d // 3600)
+    return "%dd ago" % int(d // 86400)
+
+
+# ---------------------------------------------------------------- the app
+
+class App:
+    def __init__(self, stdscr):
+        self.scr = stdscr
+        self.sel = 0
+        self.filter = ""
+        self.msg = ""
+        self.msg_err = False
+        self.cur = current_session()
+        self.all = list_sessions()
+
+    # -- data ------------------------------------------------------
+
+    def reload(self):
+        keep = self.rows()[self.sel]["name"] if self.rows() else None
+        self.all = list_sessions()
+        self.cur = current_session()
+        rows = self.rows()
+        self.sel = next((i for i, s in enumerate(rows) if s["name"] == keep), 0)
+        self.sel = max(0, min(self.sel, len(rows) - 1)) if rows else 0
+
+    def rows(self):
+        if not self.filter:
+            return self.all
+        f = self.filter.lower()
+        return [s for s in self.all if f in s["name"].lower() or f in s["label"].lower()]
+
+    def selected(self):
+        rows = self.rows()
+        return rows[self.sel] if rows else None
+
+    def note(self, text, err=False):
+        self.msg, self.msg_err = text, err
+
+    # -- drawing ---------------------------------------------------
+
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        if h < 6 or w < 30:
+            self.put(0, 0, "terminal too small"[:w - 1])
+            scr.refresh()
+            return
+
+        rows = self.rows()
+
+        # header
+        n = len(self.all)
+        title = " tmux · sessions"
+        count = "%d session%s " % (n, "" if n == 1 else "s")
+        if self.filter:
+            count = "filter: %s   %d of %d " % (self.filter, len(rows), n)
+        self.put(0, 0, fit(title, w - dwidth(count) - 1), curses.A_BOLD | self.c(1))
+        self.put(0, w - dwidth(count) - 1, count, self.c(4))
+        self.put(1, 0, "─" * (w - 1), self.c(4))
+
+        top, bottom = 2, h - 3
+        avail = bottom - top
+
+        # column layout
+        namew = max(10, min(24, max([dwidth(s["name"]) for s in rows], default=8) + 2))
+        winw, createdw, activew = 11, 11, 14
+        labelw = w - 4 - namew - winw - createdw - activew - 2
+
+        if not rows:
+            hint = ("no sessions yet — press  n  to create one"
+                    if not self.all else "nothing matches this filter")
+            self.put(top + 1, 3, fit(hint, w - 4), self.c(4))
+        else:
+            # scroll window
+            first = 0
+            if len(rows) > avail:
+                first = max(0, min(self.sel - avail // 2, len(rows) - avail))
+            for i, s in enumerate(rows[first:first + avail]):
+                idx = first + i
+                y = top + i
+                cur = (idx == self.sel)
+                attr = curses.A_REVERSE if cur else 0
+
+                mark = "●" if s["attached"] else " "
+                if s["name"] == self.cur:
+                    mark = "▸"
+                nwin = "%d win%s" % (s["windows"], "" if s["windows"] == 1 else "s")
+
+                line = " %s %s%s%s%s" % (
+                    mark,
+                    fit(s["name"], namew),
+                    fit(nwin, winw),
+                    fit("new " + ago(s["created"]), createdw),
+                    fit("active " + ago(s["activity"]), activew),
+                )
+                if labelw > 4:
+                    line += fit(s["label"], labelw)
+                self.put(y, 0, fit(line, w - 1), attr)
+
+                if not cur:
+                    # re-colour the pieces the reverse bar would have eaten
+                    if s["attached"] or s["name"] == self.cur:
+                        self.put(y, 1, mark, self.c(2) | curses.A_BOLD)
+                    self.put(y, 3 + namew,
+                             fit(nwin, winw)
+                             + fit("new " + ago(s["created"]), createdw)
+                             + fit("active " + ago(s["activity"]), activew),
+                             self.c(4))
+                    if labelw > 4 and s["label"]:
+                        self.put(y, 3 + namew + winw + createdw + activew,
+                                 fit(s["label"], labelw),
+                                 self.c(3))
+
+        # footer
+        self.put(h - 2, 0, "─" * (w - 1), self.c(4))
+        if self.msg:
+            self.put(h - 1, 0, fit(" " + self.msg, w - 1),
+                     self.c(5) if self.msg_err else self.c(2))
+        else:
+            self.draw_keyhints(h - 1, w)
+        scr.refresh()
+
+    def draw_keyhints(self, y, w):
+        """`[n] new` — bracket and label dim, the key itself bright white."""
+        dim = self.c(4)
+        keyattr = self.c(6) | curses.A_BOLD
+        x = 0
+        for key, label in KEYHINTS:
+            if x + dwidth(key) + dwidth(label) + 4 > w - 1:
+                break                      # 放不下就截断，不换行
+            self.put(y, x, " [", dim)
+            x += 2
+            self.put(y, x, key, keyattr)
+            x += dwidth(key)
+            self.put(y, x, "] ", dim)
+            x += 2
+            self.put(y, x, label, dim)
+            x += dwidth(label)
+
+    def put(self, y, x, text, attr=0):
+        try:
+            self.scr.addstr(y, x, text, attr)
+        except curses.error:
+            pass  # bottom-right cell
+
+    def c(self, pair):
+        return curses.color_pair(pair) if curses.has_colors() else 0
+
+    # -- input widgets --------------------------------------------
+
+    def prompt(self, label, initial=""):
+        """One-line editor on the footer. Returns None on Esc."""
+        buf = list(initial)
+        curses.curs_set(1)
+        self.scr.timeout(-1)
+        try:
+            while True:
+                h, w = self.scr.getmaxyx()
+                text = " %s %s" % (label, "".join(buf))
+                self.put(h - 1, 0, fit(text, w - 1), self.c(1))
+                self.scr.move(h - 1, min(dwidth(text), w - 1))
+                self.scr.refresh()
+                ch = self.scr.get_wch()
+                if isinstance(ch, str):
+                    if ch in ("\n", "\r"):
+                        return "".join(buf).strip()
+                    if ch == "\x1b":
+                        return None
+                    if ch in ("\x7f", "\b"):
+                        if buf:
+                            buf.pop()
+                        continue
+                    if ch == "\x15":            # Ctrl-U
+                        buf.clear()
+                        continue
+                    if ch == "\x03":            # Ctrl-C
+                        return None
+                    if ch.isprintable():
+                        buf.append(ch)
+                else:
+                    if ch in (curses.KEY_BACKSPACE, curses.KEY_DC):
+                        if buf:
+                            buf.pop()
+                    elif ch == curses.KEY_ENTER:
+                        return "".join(buf).strip()
+        finally:
+            curses.curs_set(0)
+            self.scr.timeout(2000)
+
+    def confirm(self, question):
+        self.scr.timeout(-1)
+        try:
+            h, w = self.scr.getmaxyx()
+            self.put(h - 1, 0, fit(" %s  [y/N]" % question, w - 1),
+                     self.c(5) | curses.A_BOLD)
+            self.scr.refresh()
+            ch = self.scr.getch()
+            return ch in (ord("y"), ord("Y"))
+        finally:
+            self.scr.timeout(2000)
+
+    def help(self):
+        lines = [
+            ("↑ ↓  j k",   "move"),
+            ("g / G",      "first / last"),
+            ("↵  or  a",   "attach (switch, if already inside tmux)"),
+            ("n",          "new session — asks for a name"),
+            ("r",          "rename the selected session"),
+            ("l",          "set / edit its label"),
+            ("d",          "kill the selected session (confirms first)"),
+            ("/",          "filter by name or label   (Esc clears)"),
+            ("R",          "refresh now (auto-refreshes every 2s)"),
+            ("q  Esc",     "quit"),
+            ("", ""),
+            ("● attached", "▸ the session you are in right now"),
+        ]
+        h, w = self.scr.getmaxyx()
+        bw = min(w - 4, 62)
+        bh = len(lines) + 4
+        y0, x0 = max(0, (h - bh) // 2), max(0, (w - bw) // 2)
+        win = curses.newwin(bh, bw, y0, x0)
+        win.bkgd(" ", self.c(1))
+        win.box()
+        win.addstr(0, 2, " keys ", curses.A_BOLD | self.c(1))
+        for i, (k, d) in enumerate(lines):
+            try:
+                win.addstr(2 + i, 3, fit(k, 12), curses.A_BOLD | self.c(1))
+                win.addstr(2 + i, 15, fit(d, bw - 18), self.c(1))
+            except curses.error:
+                pass
+        try:
+            win.addstr(bh - 1, 2, " any key to close ", self.c(4))
+        except curses.error:
+            pass
+        win.timeout(-1)
+        win.refresh()
+        win.getch()
+        del win
+        self.scr.touchwin()
+
+    # -- actions ---------------------------------------------------
+
+    def new(self):
+        name = self.prompt("new session name:")
+        if name is None:
+            return
+        name = sanitize(name)
+        if not name:
+            return self.note("cancelled — no name given")
+        if any(s["name"] == name for s in self.all):
+            return self.note("session '%s' already exists" % name, err=True)
+        cwd = os.environ.get("PWD") or os.getcwd()
+        r = tmux("new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "-c", cwd)
+        if r.returncode != 0:
+            return self.note(r.stderr.strip() or "failed to create session", err=True)
+        handoff(name)
+
+    def rename(self):
+        s = self.selected()
+        if not s:
+            return
+        new = self.prompt("rename '%s' to:" % s["name"], s["name"])
+        if new is None:
+            return
+        new = sanitize(new)
+        if not new or new == s["name"]:
+            return
+        r = tmux("rename-session", "-t", "=" + s["name"], new)
+        if r.returncode != 0:
+            return self.note(r.stderr.strip() or "rename failed", err=True)
+        self.reload()
+        rows = self.rows()
+        self.sel = next((i for i, x in enumerate(rows) if x["name"] == new), self.sel)
+        self.note("renamed to '%s'" % new)
+
+    def label(self):
+        s = self.selected()
+        if not s:
+            return
+        val = self.prompt("label for '%s':" % s["name"], s["label"])
+        if val is None:
+            return
+        if val:
+            tmux("set-option", "-t", s["id"], "@label", val)
+        else:
+            tmux("set-option", "-u", "-t", s["id"], "@label")
+        self.reload()
+        self.note("label updated")
+
+    def kill(self):
+        s = self.selected()
+        if not s:
+            return
+        mine = (s["name"] == self.cur)
+        q = ("kill '%s'? this ends the session you are in" % s["name"]) if mine \
+            else ("kill session '%s'?" % s["name"])
+        if not self.confirm(q):
+            return self.note("cancelled")
+        r = tmux("kill-session", "-t", "=" + s["name"])
+        if r.returncode != 0:
+            return self.note(r.stderr.strip() or "kill failed", err=True)
+        if mine:
+            sys.exit(0)
+        self.reload()
+        self.note("killed '%s'" % s["name"])
+
+    # -- main loop -------------------------------------------------
+
+    def run(self):
+        curses.curs_set(0)
+        self.scr.timeout(2000)      # auto-refresh
+        while True:
+            self.draw()
+            try:
+                ch = self.scr.getch()
+            except KeyboardInterrupt:
+                return
+            rows = self.rows()
+
+            if ch == -1:                       # timeout tick
+                self.reload()
+                continue
+            if ch == curses.KEY_RESIZE:
+                continue
+
+            if ch not in (ord("/"),):
+                self.msg = ""
+
+            if ch in (ord("q"), 3):
+                return
+            elif ch == 27:                     # Esc
+                if self.filter:
+                    self.filter = ""
+                    self.sel = 0
+                else:
+                    return
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                if rows:
+                    self.sel = (self.sel + 1) % len(rows)
+            elif ch in (curses.KEY_UP, ord("k")):
+                if rows:
+                    self.sel = (self.sel - 1) % len(rows)
+            elif ch == ord("g"):
+                self.sel = 0
+            elif ch == ord("G"):
+                self.sel = max(0, len(rows) - 1)
+            elif ch in (10, 13, curses.KEY_ENTER, ord("a")):
+                s = self.selected()
+                if s:
+                    if s["name"] == self.cur:
+                        self.note("you are already in '%s'" % s["name"])
+                    else:
+                        handoff(s["name"])
+            elif ch == ord("n"):
+                self.new()
+            elif ch == ord("r"):
+                self.rename()
+            elif ch == ord("l"):
+                self.label()
+            elif ch == ord("d"):
+                self.kill()
+            elif ch == ord("/"):
+                f = self.prompt("filter:", self.filter)
+                if f is not None:
+                    self.filter = f
+                    self.sel = 0
+            elif ch == ord("R"):
+                self.reload()
+                self.note("refreshed")
+            elif ch == ord("?"):
+                self.help()
+
+
+def main(stdscr):
+    if curses.has_colors():
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, 8, -1)              # dim grey
+        curses.init_pair(5, curses.COLOR_RED, -1)
+        curses.init_pair(6, curses.COLOR_WHITE, -1)
+    App(stdscr).run()
+
+
+if __name__ == "__main__":
+    locale.setlocale(locale.LC_ALL, "")
+    if not sys.stdout.isatty():
+        sys.exit("tmux-tui: needs a terminal")
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        pass

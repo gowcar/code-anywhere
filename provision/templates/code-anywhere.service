@@ -1,0 +1,19 @@
+[Unit]
+Description=code-anywhere — Telegram <-> tmux 远程会话桥
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{REPO}}
+ExecStart={{REPO}}/.venv/bin/python -m src.main
+# 由 ./setup 按 claude/codex/node 的实际位置生成；换 node 版本后重跑 ./setup 即可
+Environment=PATH={{PATH}}
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+StandardOutput=append:{{REPO}}/logs/systemd.log
+StandardError=append:{{REPO}}/logs/systemd.log
+
+[Install]
+WantedBy=default.target

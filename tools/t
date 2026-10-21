@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  '') exec "$HOME/.local/bin/tmux-tui" ;;
+  ls|list) tmux list-sessions -F '#{?session_attached,●, } #{session_name}  #{session_windows} win  #{@label}' 2>/dev/null || true ;;
+  -h|--help|help) printf 't — tmux 会话\n  t          打开会话选择器\n  t <name>   创建或进入会话\n  t ls       列出会话\n' ;;
+  *) name="${1//[.:]/-}"; if ! tmux has-session -t "=$name" 2>/dev/null; then id=$(tmux new-session -d -P -F '#{session_id}' -s "$name" -c "$PWD"); if [ "$#" -gt 1 ]; then shift; tmux set-option -t "$id" @label "$*"; fi; fi
+     if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$name"; else exec tmux attach-session -t "=$name"; fi ;;
+esac

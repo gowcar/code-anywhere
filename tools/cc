@@ -1,0 +1,18 @@
+#!/bin/sh
+# cc —— 日常那个：Claude 打头，DeepSeek 旗舰在 /model 列表里备着
+# （从 nas:~/workspace/github/yard/tools/cc 复制，base url / key 在 ~/.claude/settings.json 的 env 里）
+#
+# 为什么要有启动器：往 /model 列表里塞模型只能靠环境变量，而
+# ANTHROPIC_CUSTOM_MODEL_OPTION 是单值的 —— 一个进程只能多出一项。
+# 想要不同的组合，就让不同的启动器带不同的环境，互不干扰。
+set -e
+
+export ANTHROPIC_CUSTOM_MODEL_OPTION="deepseek/deepseek-v4-pro"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="deepseek-v4-pro"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="DeepSeek 旗舰 · 1M 上下文 · 按量计费"
+
+# DeepSeek V4 两款都是 1M 上下文，但 Claude Code 对不认识的模型一律按 200k 算。
+# 这个变量【只对不以 claude- 开头的模型生效】，所以设了不会动 Claude 自己的窗口。
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
+
+exec claude "$@"
