@@ -15,7 +15,7 @@ flowchart LR
 
 ## 快速开始
 
-需要：一台 Linux 或 macOS 机器（可以是 SSH 进去的服务器）、Python 3.10+、一个 Telegram 账号。
+需要：一台 Linux 或 macOS 机器（可以是 SSH 进去的服务器）和一个 Telegram 账号。其余依赖（Python、tmux、Node、Claude Code、Codex……）`./setup` 都会自动安装。
 
 ```sh
 git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
@@ -25,7 +25,7 @@ cd ~/workspace/code-anywhere
 
 `./setup` 是交互式的，按提示一步步来，大约 10 分钟：
 
-1. **装依赖**：tmux、uv、Claude Code、Codex、glab，缺什么提示什么。
+1. **装依赖**：Python、tmux、Node、Claude Code、Codex、glab，缺什么自动装什么；`./setup --yes` 全部默认同意。
 2. **建 bot**：在 Telegram 找 [@BotFather](https://t.me/BotFather) → `/newbot`，把 token 粘贴给 setup，它会立刻验证。
 3. **建群**：新建群 → 开启「话题 / Topics」→ 把 bot 设为管理员（勾选“管理话题”）→ 在群里随便发一句话。setup 收到后**自动识别群 ID 和你的账号**，只允许你本人使用。
 4. **其余全自动**：Claude hooks、会话通信 MCP、全局规则、开机自启的常驻服务，最后往群里发一条“✅ 已就绪”。
@@ -34,7 +34,7 @@ cd ~/workspace/code-anywhere
 
 ## 日常怎么用
 
-**开始一个项目**：在服务器上进入项目目录，运行一次 `claude` 或 `codex` 随便说句话。5 分钟内群里会出现同名话题，之后就可以只在手机上聊了。
+**开始一个项目**：在群里发 `/new 项目名`（默认 Claude，`/new 项目名 codex` 用 Codex），立刻出现同名话题，进去直接说话。已有的目录也可以：在服务器上进入目录运行一次 `claude` 或 `codex` 说句话，5 分钟内自动出现话题。
 
 **在话题里**：
 
@@ -50,7 +50,8 @@ cd ~/workspace/code-anywhere
 
 | 命令 | 作用 |
 |---|---|
-| `/model` | 查看或切换引擎：`/model claude`、`/model codex full` |
+| `/new 名字` | 在服务器上建项目目录 + 话题并启动 CLI，全程不用登录服务器 |
+| `/model` | 查看当前模型；`/model list` 列出全部；`/model claude sonnet high full` 一句切换引擎、模型、effort、权限，历史不丢 |
 | `/permissions` | Codex 权限：`full` / `workspace` / `read-only` |
 | `/status` | 所有会话的活动状态（进行中、空闲、失败） |
 | `/issues` | GitLab issue 按状态汇总，待验证的附验证方法（见下文） |

@@ -65,5 +65,21 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("{{", text)
 
 
+class DependencyTests(unittest.TestCase):
+    def test_package_manager_detection(self):
+        only = lambda *names: (lambda n: n in names)
+        self.assertEqual(setup.package_install_command(["tmux"], False, only("dnf", "yum")), "sudo dnf install -y tmux")
+        self.assertTrue(setup.package_install_command(["tmux", "git"], False, only("apt-get")).endswith("install -y tmux git"))
+        self.assertEqual(setup.package_install_command(["tmux"], True, only("brew")), "brew install tmux")
+        self.assertIsNone(setup.package_install_command(["tmux"], True, only()))
+        self.assertIsNone(setup.package_install_command(["tmux"], False, only()))
+
+    def test_node_picks_latest_of_major(self):
+        index = [{"version": "v23.1.0"}, {"version": "v22.23.4"}, {"version": "v22.1.0"}]
+        self.assertEqual(setup.node_dist_name(index, "linux", "x86_64"),
+                         ("v22.23.4", "node-v22.23.4-linux-x64.tar.xz"))
+        self.assertEqual(setup.node_dist_name(index, "darwin", "arm64")[1], "node-v22.23.4-darwin-arm64.tar.xz")
+
+
 if __name__ == "__main__":
     unittest.main()

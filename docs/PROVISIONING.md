@@ -6,6 +6,7 @@
 git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
 cd ~/workspace/code-anywhere
 ./setup            # 交互式安装 / 修复
+./setup --yes      # 所有安装与写入都默认同意，一路装到底（bot token 等仍需你填）
 ./setup --check    # 只检查，不改任何东西
 ./setup --only telegram,service   # 只跑部分步骤
 ```
@@ -14,7 +15,7 @@ cd ~/workspace/code-anywhere
 
 | 步骤 | 做什么 |
 |---|---|
-| deps | git / curl / tmux（系统包，给出 apt/brew 命令）、uv、claude、codex（需 node）、glab |
+| deps | 全部自动装：git / curl / tmux（自动识别 apt、dnf、yum、pacman、zypper、apk、brew；Mac 无 Homebrew 时先装它）、uv、claude、Node 22（从 nodejs.org 下载到 `~/.local/share/node`，免 sudo）、codex（npm 装到 `~/.local`）、glab。Python 3.10+ 由入口脚本 `./setup` 先行安装 |
 | python | 用 uv 建 `.venv`，装 `requirements-mcp.txt`（含 `requirements.txt`） |
 | tools | `tools/` 下的 `t`、`tmux-tui`、`cc`、`gitlab-upload` → `~/.local/bin`，`tmux.conf` → `~/.tmux.conf`；已有且不同的先备份 |
 | auth | Claude（`claude auth status` 或 `.env` 的 `ANTHROPIC_API_KEY`）、Codex（登录或 config.toml 网关） |

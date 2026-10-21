@@ -32,6 +32,7 @@ MCP_CMD = str(REPO / "scripts" / "session-mcp")
 BEGIN, END = "<!-- code-anywhere:begin -->", "<!-- code-anywhere:end -->"
 IS_MAC = sys.platform == "darwin"
 CHECK_ONLY = False
+ASSUME_YES = False
 PROBLEMS: list[str] = []
 
 
@@ -49,6 +50,9 @@ def warn(msg):
 def ask(question: str, default: bool = True) -> bool:
     if CHECK_ONLY:
         return False
+    if ASSUME_YES:
+        print(f"  ? {question} → 是（--yes）")
+        return True
     hint = "[Y/n]" if default else "[y/N]"
     answer = input(f"  ? {question} {hint} ").strip().lower()
     return default if not answer else answer in {"y", "yes", "是"}
@@ -172,38 +176,102 @@ def check_group(token: str, chat_id: int, bot_id: int) -> list[str]:
 
 # ---------------------------------------------------------------- 步骤
 
+PACKAGE_MANAGERS = [  # (命令, 安装前缀)；按顺序找第一个可用的
+    ("apt-get", "sudo apt-get update && sudo apt-get install -y"),
+    ("dnf", "sudo dnf install -y"), ("yum", "sudo yum install -y"),
+    ("pacman", "sudo pacman -S --noconfirm"), ("zypper", "sudo zypper install -y"), ("apk", "sudo apk add"),
+]
+BREW_INSTALL = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+
+def package_install_command(packages: list[str], is_mac: bool | None = None, available=shutil.which) -> str | None:
+    """当前系统安装这些包的命令；找不到包管理器返回 None。"""
+    if (IS_MAC if is_mac is None else is_mac):
+        return f"brew install {' '.join(packages)}" if available("brew") else None
+    for manager, prefix in PACKAGE_MANAGERS:
+        if available(manager):
+            return f"{prefix} {' '.join(packages)}"
+    return None
+
+
 def step_deps():
-    """基础依赖：git / curl / tmux / uv / node / claude / codex / glab"""
+    """基础依赖：git / curl / tmux / uv / node / claude / codex / glab（缺什么装什么）"""
     system = [n for n in ("git", "curl", "tmux") if not shutil.which(n)]
-    if system:
-        cmd = (f"brew install {' '.join(system)}" if IS_MAC
-               else f"sudo apt-get install -y {' '.join(system)}")
-        warn(f"缺少 {', '.join(system)}，安装命令：{cmd}")
-        if ask(f"现在执行 `{cmd}`？"):
-            run(cmd, shell=True, capture=False)
-    else:
+    if not system:
         ok("git / curl / tmux")
+    else:
+        warn(f"缺少 {', '.join(system)}")
+        if IS_MAC and not shutil.which("brew") and ask("macOS 需要 Homebrew 来装它们，现在安装 Homebrew？"):
+            run(BREW_INSTALL, shell=True, capture=False)
+            os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ["PATH"]
+        cmd = package_install_command(system)
+        if not cmd:
+            info("没有找到可用的包管理器，请手动安装后重跑 ./setup")
+        elif ask(f"现在执行 `{cmd}`？（可能要求输入 sudo 密码）"):
+            run(cmd, shell=True, capture=False)
     installers = {
         "uv": "curl -LsSf https://astral.sh/uv/install.sh | sh",
         "claude": "curl -fsSL https://claude.ai/install.sh | bash",
-        "codex": "npm install -g @openai/codex",
     }
     for name, cmd in installers.items():
         if which(name):
             ok(name)
-            continue
-        if name == "codex" and not shutil.which("npm"):
-            warn("codex 需要 node/npm（建议用 fnm 或 nvm 装 Node 22+），装好后重跑 ./setup")
-            continue
-        warn(f"缺少 {name}，安装命令：{cmd}")
-        if ask(f"现在安装 {name}？"):
-            run(cmd, shell=True, capture=False)
+        else:
+            warn(f"缺少 {name}")
+            if ask(f"现在安装 {name}（{cmd}）？"):
+                run(cmd, shell=True, capture=False)
+    if which("node") and which("npm"):
+        ok("node / npm")
+    else:
+        warn("缺少 Node.js（Codex 需要）")
+        if ask("从 nodejs.org 下载 Node 22 到 ~/.local/share/node（不需要 sudo）？"):
+            install_node()
+    if which("codex"):
+        ok("codex")
+    elif which("npm"):
+        warn("缺少 codex")
+        if ask("现在安装 codex（npm install -g --prefix ~/.local @openai/codex）？"):
+            run([which("npm"), "install", "-g", "--prefix", str(HOME / ".local"), "@openai/codex"], capture=False)
+    else:
+        warn("缺少 codex：需要先装 Node.js（只用 Claude 可忽略）")
     if which("glab"):
         ok("glab")
     else:
         warn("缺少 glab（GitLab issue 流程需要）")
         if ask("现在下载 glab 到 ~/.local/bin？"):
             install_glab()
+
+
+def node_dist_name(index: list[dict], system: str, machine: str, major: str = "v22") -> tuple[str, str]:
+    """从 nodejs.org 的 index.json 选出该大版本最新 LTS 的 (版本, 压缩包名)。"""
+    os_name = {"darwin": "darwin", "linux": "linux"}[system]
+    arch = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}[machine.lower()]
+    release = next(r for r in index if r["version"].startswith(major + "."))
+    return release["version"], f"node-{release['version']}-{os_name}-{arch}.tar.xz"
+
+
+def install_node():
+    with urllib.request.urlopen("https://nodejs.org/dist/index.json", timeout=30) as resp:
+        index = json.load(resp)
+    version, archive_name = node_dist_name(index, "darwin" if IS_MAC else "linux", platform.machine())
+    print(f"    下载 {archive_name} …")
+    with urllib.request.urlopen(f"https://nodejs.org/dist/{version}/{archive_name}", timeout=600) as resp:
+        data = resp.read()
+    root = HOME / ".local" / "share" / "node"
+    root.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
+        try:
+            archive.extractall(root, filter="data")
+        except TypeError:  # 3.12 之前的部分小版本没有 filter 参数
+            archive.extractall(root)
+    node_bin = root / archive_name.removesuffix(".tar.xz") / "bin"
+    BIN.mkdir(parents=True, exist_ok=True)
+    for name in ("node", "npm", "npx"):
+        link = BIN / name
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(node_bin / name)
+    ok(f"Node {version} → {node_bin}（已链接到 ~/.local/bin）")
 
 
 def install_glab():
@@ -550,9 +618,13 @@ def main():
     global CHECK_ONLY
     parser = argparse.ArgumentParser(description="code-anywhere 安装 / 自检")
     parser.add_argument("--check", action="store_true", help="只检查，不做任何修改")
+    parser.add_argument("--yes", "-y", action="store_true", help="所有安装与写入都默认同意")
     parser.add_argument("--only", help="只跑这些步骤（逗号分隔）：" + ",".join(STEPS))
     args = parser.parse_args()
     CHECK_ONLY = args.check
+    global ASSUME_YES
+    ASSUME_YES = args.yes
+    os.environ["PATH"] = f"{BIN}:{os.environ.get('PATH', '')}"  # 刚装的命令后续步骤立刻可用
     names = args.only.split(",") if args.only else list(STEPS)
     print(f"code-anywhere {'自检' if CHECK_ONLY else '安装'}：{REPO}\n")
     for i, name in enumerate(names, 1):
