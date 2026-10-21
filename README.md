@@ -56,7 +56,7 @@ cd ~/workspace/code-anywhere
 | `/model` | 查看当前模型；`/model list` 列出全部；`/model claude sonnet high full` 一句切换引擎、模型、effort、权限，历史不丢 |
 | `/permissions` | Codex 权限：`full` / `workspace` / `read-only` |
 | `/status` | 所有会话的活动状态（进行中、空闲、失败） |
-| `/issues` | GitLab issue 按状态汇总，待验证的附验证方法（见下文） |
+| `/issues` | GitLab issue 按状态汇总，待验证的附验证方法；每条带按钮：✅ 通过 / ↩️ 不通过 / 🗑 放弃（见下文） |
 | `/projects` `/sessions` | 项目列表、历史会话 |
 | `/trust` `/whoami` | 项目信任开关、你的 TG ID |
 
@@ -95,6 +95,7 @@ flowchart LR
 
 - issue-desk 维护一张**别名路由表**（“App”→ iOS 仓库，“服务端”→ 后端仓库……），在 `~/workspace/issue-desk/CLAUDE.md` 里随时改。
 - 状态：`agent:todo` → `agent:doing` → `agent:to-verify` → 你验证后关闭；`agent:blocked` 表示需要你决定。
+- 在 TG 发 `/issues` 就能处理：点 **✅ 通过** 直接关闭；点 **↩️ 不通过** 退回待处理，并可直接回复原因（会写进 issue、通知负责会话）；不想做了点 **🗑 放弃**（二次确认）。负责会话按项目的 git 远端自动找到。
 - 截图会上传到 GitLab，同时在本机留原件，项目会话用 `issue-images <仓库> <编号>` 直接取。
 
 ## 常见问题
