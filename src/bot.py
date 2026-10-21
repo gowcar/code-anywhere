@@ -228,6 +228,37 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"已创建：{link(tid)}")
 
 
+async def cmd_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/abort：中断当前回合，丢弃已发出但还没被处理的消息（CLI 排队的 + 桥接还没投递的相册）。"""
+    if not auth_check(update.effective_user.id):
+        return
+    cwd = _update_cwd(update)
+    if not cwd:
+        await update.message.reply_text("请在已绑定的项目话题内使用 /abort")
+        return
+    message = update.message
+    topic_id = message.message_thread_id or message.chat_id
+    albums = [k for k in _media_groups if k[0] == message.chat_id and k[1] == message.message_thread_id]
+    for key in albums:
+        _media_groups.pop(key, None)
+    from src import abort
+    async with _project_locks.setdefault(cwd, asyncio.Lock()):
+        backend = backends.get_backend(cwd)
+        pane = await _find_pane_for_project(cwd)
+        running, dropped = (await abort.abort(pane, backend)) if pane else (False, "")
+    stop_typing(topic_id)
+    log.info("[abort] %s pane=%s running=%s dropped=%s albums=%s", Path(cwd).name, pane, running, bool(dropped), len(albums))
+    lines = ["⏹ 已中断当前回合" if running else "当前没有正在运行的回合"]
+    if dropped:
+        shown = dropped if len(dropped) <= 800 else dropped[:800] + "…"
+        lines.append(f"已丢弃排队中的消息（需要的话可重发）：\n{shown}")
+    if albums:
+        lines.append(f"已丢弃 {len(albums)} 组还在接收中的相册")
+    if not running and not dropped and not albums:
+        lines.append("没有需要丢弃的排队消息")
+    await message.reply_text("\n".join(lines), parse_mode=None)
+
+
 async def cmd_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         return
@@ -953,12 +984,16 @@ MEDIA_GROUP_QUIET_SECONDS = 1.2
 
 async def _flush_media_group(key):
     """TG sends album items separately, without an end marker; wait for quiet."""
-    batch = _media_groups[key]
+    batch = _media_groups.get(key)
+    if batch is None:
+        return
     while True:
         remaining = MEDIA_GROUP_QUIET_SECONDS - (time.monotonic() - batch["updated"])
         if remaining <= 0:
             break
         await asyncio.sleep(remaining)
+    if _media_groups.get(key) is not batch:  # 等待期间被 /abort 丢弃
+        return
     _media_groups.pop(key, None)
     updates = sorted(batch["updates"].values(), key=lambda u: u.message.message_id)
     update = updates[0]
@@ -1363,6 +1398,7 @@ def create_app() -> Application:
         await application.bot.set_my_commands([
             BotCommand("model", "模型 / effort / 权限：/model list 查看全部"),
             BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
+            BotCommand("abort", "中断当前回合，丢弃还没处理的排队消息"),
             BotCommand("new", "新建项目：/new 名字 [claude|codex]"),
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
@@ -1398,6 +1434,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("issues", cmd_issues))
     app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("abort", cmd_abort))
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     # 文本消息

@@ -52,6 +52,7 @@ cd ~/workspace/code-anywhere
 | 命令 | 作用 |
 |---|---|
 | `/new 名字` | 在服务器上建项目目录 + 话题并启动 CLI，全程不用登录服务器 |
+| `/abort` | 中断正在跑的回合，并丢弃已发出但还没处理的排队消息（会把丢弃的原文回给你） |
 | `/model` | 查看当前模型；`/model list` 列出全部；`/model claude sonnet high full` 一句切换引擎、模型、effort、权限，历史不丢 |
 | `/permissions` | Codex 权限：`full` / `workspace` / `read-only` |
 | `/status` | 所有会话的活动状态（进行中、空闲、失败） |
