@@ -124,6 +124,8 @@ async def run_app(app, allowed_updates: list[str] | None = None) -> None:
             poll_task.result()  # 有异常就在这里炸出来，不再静默吞掉
     finally:
         poll_task.cancel()
+        from src.api_server import stop_watchers
+        await stop_watchers()
         try:
             await poll_task
         except asyncio.CancelledError:

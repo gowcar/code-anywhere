@@ -52,3 +52,7 @@ logs/topic-cleanup-*/
 
 # Delivery/backfill receipts (contain message IDs)
 logs/*.json
+
+# Watcher resume positions
+.watch-offsets.json
+.watch-offsets.tmp

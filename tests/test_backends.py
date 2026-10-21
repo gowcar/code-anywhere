@@ -98,6 +98,57 @@ class ClaudeLateWatcherTests(unittest.TestCase):
             api_server._watchers.pop('target', None)
 
 
+class WatchResumeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        for p in (patch.object(api_server, 'WATCH_OFFSETS_FILE', self.root / 'offsets.json'),
+                  patch.object(api_server, '_watch_offsets', None)):
+            p.start(); self.addCleanup(p.stop)
+
+    def test_saved_offset_round_trip_and_limits(self):
+        log = self.root / 'a.jsonl'
+        api_server.save_watch_offset(str(log), 100)
+        api_server._watch_offsets = None  # 模拟重启后从磁盘读取
+        self.assertEqual(api_server.saved_watch_offset(str(log), 150), 100)
+        self.assertIsNone(api_server.saved_watch_offset(str(log), 50))  # 文件被截断
+        self.assertIsNone(api_server.saved_watch_offset(str(log), 100 + api_server.WATCH_RESUME_MAX_BACKLOG + 1))
+        api_server._offsets()[str(log.resolve())][1] -= api_server.WATCH_RESUME_MAX_AGE + 1
+        self.assertIsNone(api_server.saved_watch_offset(str(log), 150))
+
+    def test_recovery_resumes_from_saved_offset(self):
+        folder = self.root / 'proj'; folder.mkdir()
+        log = folder / 'sid.jsonl'
+        log.write_text('{"a": 1}\n{"b": 2}\n')
+        api_server.save_watch_offset(str(log), 9)
+        started = []
+
+        async def fake_watch(sid, path, *args, start_pos=None):
+            started.append(start_pos)
+
+        with patch('src.projects.claude_dir', return_value=folder), \
+             patch('src.projects.get_topic', return_value=7), \
+             patch.object(backends, 'get_backend', return_value='claude'), \
+             patch.object(backends, 'pane_processes', AsyncMock(return_value=['claude'])), \
+             patch.object(api_server, '_watch_transcript', fake_watch), \
+             patch.object(api_server, '_bot', object()), \
+             patch.object(api_server.config, 'CHAT_ID', 34), \
+             patch.dict(api_server.terminal_sessions, {}, clear=True):
+            asyncio.run(api_server.register_pane_watcher('%1', '/p', resume_saved=True))
+            asyncio.run(api_server.register_pane_watcher('%1', '/p'))  # 非恢复场景仍从末尾开始
+        api_server._watchers.pop('sid', None)
+        self.assertEqual(started, [9, log.stat().st_size])
+
+    def test_stop_watchers_cancels_all(self):
+        async def scenario():
+            task = asyncio.create_task(asyncio.sleep(60))
+            with patch.dict(api_server._watchers, {'s': task}, clear=True):
+                await api_server.stop_watchers()
+            return task.cancelled()
+        self.assertTrue(asyncio.run(scenario()))
+
+
 class PreferencesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

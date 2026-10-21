@@ -18,6 +18,7 @@ Web client 总线（web admin 接入用）：
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
@@ -324,7 +325,8 @@ def retire_project_watchers(cwd: str, backend: str, keep_sid: str | None = None)
         terminal_sessions.pop(sid, None)
 
 
-async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str, int] | None = None) -> bool:
+async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str, int] | None = None,
+                                resume_saved: bool = False) -> bool:
     if not _bot or not config.CHAT_ID:
         return False
     topic_id = projects.get_topic(cwd)
@@ -394,6 +396,11 @@ async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str,
     file_size = latest.stat().st_size
     start_pos = file_size if start_offsets is None else min(
         start_offsets.get(str(latest.resolve()), 0), file_size)
+    if resume_saved and start_offsets is None:
+        saved = saved_watch_offset(str(latest), file_size)
+        if saved is not None and saved < file_size:
+            log.info("[register_pane] 从上次转发位置补发 %s 字节 sid=%s", file_size - saved, sid)
+            start_pos = saved
     _watchers[sid] = asyncio.create_task(_watch_transcript(
         sid, str(latest), topic_id, config.CHAT_ID, start_pos=start_pos))
     log.info("[register_pane] %s %s pane=%s sid=%s topic=%s offset=%s", backend, Path(cwd).name, pane_id, sid, topic_id, start_pos)
@@ -461,6 +468,52 @@ async def handle_session_start(request: web.Request) -> web.Response:
 # JSONL Watcher 任务：session_id → Task（多 session 改造后按 sid 索引）
 _watchers: dict[str, asyncio.Task] = {}
 
+# 已完整转发到的位置（按日志文件）：服务重启后从这里接着转发，不丢重启间隙里的回复
+WATCH_OFFSETS_FILE = Path(__file__).resolve().parent.parent / ".watch-offsets.json"
+WATCH_RESUME_MAX_AGE = 6 * 3600      # 停机太久不补发，免得一次性刷屏
+WATCH_RESUME_MAX_BACKLOG = 1 << 20   # 积压超过 1MB 同理
+_watch_offsets: dict[str, list] | None = None
+
+
+def _offsets() -> dict[str, list]:
+    global _watch_offsets
+    if _watch_offsets is None:
+        try:
+            _watch_offsets = json.loads(WATCH_OFFSETS_FILE.read_text())
+        except (OSError, ValueError):
+            _watch_offsets = {}
+    return _watch_offsets
+
+
+def save_watch_offset(path: str, pos: int) -> None:
+    offsets = _offsets()
+    offsets[str(Path(path).resolve())] = [pos, time.time()]
+    tmp = WATCH_OFFSETS_FILE.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(offsets))
+        tmp.replace(WATCH_OFFSETS_FILE)
+    except OSError:
+        log.warning("[watcher] 保存转发位置失败", exc_info=True)
+
+
+def saved_watch_offset(path: str, file_size: int) -> int | None:
+    entry = _offsets().get(str(Path(path).resolve()))
+    if not entry:
+        return None
+    pos, saved_at = entry
+    if pos > file_size or time.time() - saved_at > WATCH_RESUME_MAX_AGE \
+            or file_size - pos > WATCH_RESUME_MAX_BACKLOG:
+        return None
+    return pos
+
+
+async def stop_watchers() -> None:
+    """停服务时先停监听，再关 TG 连接：避免“处理了却发送失败”的消息被当成已转发。"""
+    tasks = list(_watchers.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int, start_pos: int | None = None):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
@@ -523,9 +576,13 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
     if backend == "codex":
         turn_status.bootstrap(session_id, path, last_pos)
     next_failure_notice = 0.0
+    processed_pos = last_pos  # 上一批已完整处理的位置；批中途被取消时不前移
     try:
         while True:
             await asyncio.sleep(0.5)
+            if last_pos != processed_pos:
+                processed_pos = last_pos
+                save_watch_offset(path, processed_pos)
             if backend == "codex" and asyncio.get_running_loop().time() >= next_failure_notice:
                 next_failure_notice = asyncio.get_running_loop().time() + 5
                 try:
@@ -812,6 +869,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
     except Exception as e:
         log.error(f"[watcher] error: {e}")
     finally:
+        save_watch_offset(path, processed_pos)
         log.info(f"[watcher] stop session={session_id}")
 
 
@@ -1176,6 +1234,6 @@ async def _recover_active_sessions():
             try:
                 pane = await _find_pane_for_project(cwd)
                 if pane:
-                    await register_pane_watcher(pane, cwd)
+                    await register_pane_watcher(pane, cwd, resume_saved=True)
             except Exception:
                 log.exception("[recover] failed project=%s", cwd)
