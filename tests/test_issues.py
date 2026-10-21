@@ -44,5 +44,20 @@ class VerifyHintTests(unittest.TestCase):
         self.assertIn("未写验证方法", text)
 
 
+
+class ButtonTests(unittest.TestCase):
+    def test_keyboard_actions_per_state(self):
+        found = [dict(issue(1, ["agent:to-verify"]), project_id=9), dict(issue(2, ["agent:doing"]), project_id=9),
+                 dict(issue(3, ["area:web"]), project_id=9)]
+        rows = [[b.callback_data for b in row] for row in issues.keyboard(found).inline_keyboard]
+        self.assertEqual(rows, [["is:pass:9:1", "is:fail:9:1"], ["is:drop:9:2"], ["is:refresh:0:0"]])
+        self.assertTrue(all(len(d.encode()) <= 64 for row in rows for d in row))  # TG 回调数据上限
+
+    def test_repo_path_parsing(self):
+        self.assertEqual(issues.repo_path("gitlab@git.garena.com:shopee/platform/digital-buddy-ios.git"),
+                         "shopee/platform/digital-buddy-ios")
+        self.assertEqual(issues.repo_path("https://git.garena.com/kong/seatalk-workspace.git"), "kong/seatalk-workspace")
+
+
 if __name__ == "__main__":
     unittest.main()

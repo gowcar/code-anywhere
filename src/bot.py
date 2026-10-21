@@ -400,18 +400,95 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ /status ============
 
 async def cmd_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """按 agent:* 状态汇总 GitLab issue；直接调 API，不经过模型。"""
+    """按 agent:* 状态汇总 GitLab issue（直接调 API，不经过模型），每条带操作按钮。"""
     if not auth_check(update.effective_user.id):
         return
+    text, markup = await _issues_summary()
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+
+
+async def _issues_summary():
     from src import issues
     try:
-        text = issues.format_summary(await asyncio.to_thread(issues.fetch_open_issues))
+        found = await asyncio.to_thread(issues.fetch_open_issues)
+        return issues.format_summary(found), issues.keyboard(found)
     except FileNotFoundError:
-        text = "还没有配置 GitLab 令牌（~/.config/gitlab-token），运行 ./setup --only gitlab"
+        return "还没有配置 GitLab 令牌（~/.config/gitlab-token），运行 ./setup --only gitlab", None
     except Exception as exc:
         log.warning("[issues] 查询失败: %s", exc)
-        text = f"⚠️ 查询 GitLab 失败：{exc}"
-    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+        return f"⚠️ 查询 GitLab 失败：{html_lib.escape(str(exc))}", None
+
+
+# “不通过”时请用户回复原因：提示消息 id → (project_id, iid)
+_issue_reason_prompts: dict[int, tuple[int, int]] = {}
+
+
+async def _issues_callback(query, context, data: str):
+    from telegram import ForceReply
+    from src import issues
+    _, action, project_id, iid = data.split(":")
+    project_id, iid = int(project_id), int(iid)
+    if action == "refresh":
+        await query.answer("已刷新")
+    elif action == "drop":  # 放弃要二次确认，防手滑
+        issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
+        await query.answer()
+        await query.edit_message_reply_markup(issues.confirm_keyboard(project_id, iid, issues.short_ref(issue)))
+        return
+    else:
+        issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
+        ref = issues.short_ref(issue)
+        try:
+            if action == "pass":
+                await asyncio.to_thread(issues.verify_pass, project_id, iid)
+                await query.answer(f"{ref} 已验证通过并关闭")
+            elif action == "fail":
+                await asyncio.to_thread(issues.verify_fail, project_id, iid)
+                await query.answer(f"{ref} 已退回待处理")
+                prompt = await query.message.reply_text(
+                    f"↩️ {ref} 已退回待处理。直接回复这条消息说明哪里不对，我会写进 issue 并通知负责的会话；不说明也可以。",
+                    reply_markup=ForceReply(selective=True))
+                _issue_reason_prompts[prompt.message_id] = (project_id, iid)
+            elif action == "dropok":
+                was_doing = "agent:doing" in issue.get("labels", [])
+                await asyncio.to_thread(issues.abandon, project_id, iid)
+                note = ""
+                if was_doing:
+                    note = "；" + await issues.notify_owner(
+                        issue, f"GitLab issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
+                await query.answer(f"{ref} 已放弃并关闭")
+                if note:
+                    await query.message.reply_text(f"🗑 {ref} 已放弃并关闭{note}")
+        except Exception as exc:
+            log.warning("[issues] 操作失败 %s %s: %s", action, ref, exc)
+            await query.answer(f"操作失败：{exc}"[:190], show_alert=True)
+    text, markup = await _issues_summary()  # 原地刷新汇总
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
+    except Exception as exc:
+        if "not modified" not in str(exc):
+            log.warning("[issues] 刷新汇总失败: %s", exc)
+
+
+async def _handle_issue_reason(message) -> bool:
+    """用户回复了“说明哪里不对”的提示：写进 issue 并通知负责会话。返回 True 表示已处理，不再转给项目会话。"""
+    reply_to = message.reply_to_message
+    target = _issue_reason_prompts.pop(reply_to.message_id, None) if reply_to else None
+    if not target:
+        return False
+    from src import issues
+    project_id, iid = target
+    reason = (message.text or message.caption or "").strip()
+    try:
+        issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
+        await asyncio.to_thread(issues.note, project_id, iid, f"↩️ 验证未通过的原因（用户在 TG 补充）：\n\n{reason}")
+        result = await issues.notify_owner(
+            issue, f"GitLab issue 验证未通过：{issue['web_url']}，{reason[:120]}；请按全局规则「GitLab issue 处理」重新接手。")
+        await message.reply_text(f"已写进 {issues.short_ref(issue)}；{result}")
+    except Exception as exc:
+        log.warning("[issues] 记录原因失败: %s", exc)
+        await message.reply_text(f"⚠️ 记录原因失败：{exc}")
+    return True
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -449,6 +526,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = query.data
     chat_id = query.message.chat_id
+
+    if data.startswith("is:"):  # /issues 按钮：验证通过 / 不通过 / 放弃 / 刷新
+        await _issues_callback(query, context, data)
+        return
 
     if data.startswith("lv:"):  # 状态告警按钮：看终端 / 中断
         _, action, topic = data.split(":", 2)
@@ -1051,6 +1132,9 @@ def _update_cwd(update: Update) -> str | None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    if message and message.reply_to_message and auth_check(update.effective_user.id) \
+            and await _handle_issue_reason(message):
+        return
     if message and message.message_thread_id:
         from src import liveness
         liveness.note_activity(message.message_thread_id)
