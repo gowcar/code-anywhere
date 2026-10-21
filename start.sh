@@ -3,24 +3,10 @@ set -e
 
 cd "$(dirname "$0")"
 
-# 首次设置
+# 首次设置：交给 ./setup（交互式，自动识别群组、装服务）
 if [ ! -f .env ]; then
-    cp .env.example .env
-    echo ""
-    echo "══════════════════════════════════════════════"
-    echo "  Code Anywhere — 首次设置"
-    echo "══════════════════════════════════════════════"
-    echo ""
-    echo "  已生成 .env，请编辑填入 BOT_TOKEN："
-    echo "  vim $(pwd)/.env"
-    echo ""
-    echo "  群组话题设置："
-    echo "  a) 创建 Telegram 群组"
-    echo "  b) 将 Bot 加入并设为管理员"
-    echo "  c) 群组设置 → 开启「话题 / Topics」"
-    echo ""
-    echo "  填好后: ./start.sh"
-    echo "══════════════════════════════════════════════"
+    echo "首次使用请运行 ./setup（交互式安装，约 10 分钟）。"
+    echo "日常由 systemd/launchd 常驻运行，一般不需要手动 ./start.sh。"
     exit 1
 fi
 
