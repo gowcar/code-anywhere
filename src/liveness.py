@@ -135,6 +135,7 @@ class Topic:
     card_updated: float = 0.0
     card_posted: float = 0.0
     frame: int = 0                       # 转圈动画帧：每次刷新换一帧，停了就说明没在刷新
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 定时检查与工具事件可能同时到：防止各发一张卡
     alert_id: int | None = None
     title_applied_at: float = 0.0
 
@@ -352,6 +353,10 @@ class Monitor:
                 _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
+        async with topic.lock:
+            await self._update_card(topic, now, force)
+
+    async def _update_card(self, topic: Topic, now: float, force: bool):
         if not topic.turn_started or (not force and now - topic.turn_started < CARD_AFTER):
             return
         if topic.state == "idle" or self._paused():

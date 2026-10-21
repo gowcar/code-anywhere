@@ -19,6 +19,7 @@ class FakeBot:
         self.sent, self.edited, self.deleted, self.renamed = [], [], [], []
 
     async def send_message(self, **kw):
+        await asyncio.sleep(0)  # 像真实网络请求一样让出执行权，才能暴露并发问题
         self.next_id += 1
         self.sent.append(kw)
         return SimpleNamespace(message_id=self.next_id)
@@ -87,6 +88,24 @@ class MonitorTests(unittest.TestCase):
         text = liveness.card_text(topic, 2001.0)
         self.assertTrue(text.splitlines()[0][0] in liveness.SPINNER)
         self.assertEqual(text.count("⚡ step"), 4)                  # 只滚动显示最近 4 条
+
+    def test_concurrent_updates_send_only_one_card(self):
+        async def scenario():
+            topic = liveness._topics.setdefault(7, liveness.Topic(7))
+            topic.turn_started, topic.state = 1000.0, "running"
+            await asyncio.gather(self.mon.update_card(topic, 1020.0, force=True),
+                                 self.mon.update_card(topic, 1020.0, force=True))
+        asyncio.run(scenario())
+        self.assertEqual(len(self.bot.sent), 1)
+
+    def test_race_reproduces_without_lock(self):
+        async def scenario():
+            topic = liveness._topics.setdefault(7, liveness.Topic(7))
+            topic.turn_started, topic.state = 1000.0, "running"
+            await asyncio.gather(self.mon._update_card(topic, 1020.0, True),
+                                 self.mon._update_card(topic, 1020.0, True))
+        asyncio.run(scenario())
+        self.assertEqual(len(self.bot.sent), 2)                    # 不加锁就会各发一张
 
     def test_stall_alert_once_with_buttons_and_recovery(self):
         self.at(0, snap(tokens="↓ 1k"))
