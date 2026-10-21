@@ -15,6 +15,7 @@ __pycache__/
 .codex-sessions.tmp
 .permissions.json
 .permissions.tmp
+.agent-message-receipts.sqlite3*
 *.bak
 
 # Logs
@@ -40,3 +41,14 @@ poc/.venv/
 poc/.env
 poc/.state.json
 poc/poc_debug.log
+
+# Local conversation recovery archives
+logs/recovery-*/
+
+logs/topic-cleanup-*/
+
+# Sanitized turn state and failure notification receipts
+.turn-status.sqlite3*
+
+# Delivery/backfill receipts (contain message IDs)
+logs/*.json

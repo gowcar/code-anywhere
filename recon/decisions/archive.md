@@ -1,0 +1,8 @@
+# 归档：已结论条目
+
+**2026-10-06 反引号图片路径修复 🟢**：公开回复独立codespan图片路径复用现有上传验证和同条去重；57测试通过。资产 `src/image_delivery.py`、`tests/test_image_delivery.py`、`recon/wiki/tg-image-delivery.md`；systemd已部署，health=ok，真实原回复解析命中；未外发验证或补发旧登录图。
+**2026-10-06 00:56 ImageView缺口确认 🟡**：apex查看`/tmp/claude-slides-present-main.png`，无公开路径引用，现有ImageView规则仅认.attachments，因此未上传；见 `recon/wiki/tg-image-delivery.md`。
+**2026-10-08 TG底部乱码定位 🟢 / 待修**：apex回执14291直接包含原生cite/turn搜索引用和私用区字符，TG未渲染显示方框。证据 `recon/wiki/tg-citation-rendering.md`；未改代码。
+**2026-10-08 本客户端MCP配置 🟢**：用户授权添加local-sessions并仅列会话；使用codex mcp add写入 `/home/toc/SSE/.codex/config.toml`，保留其余设置。独立stdio客户端按配置调用list_sessions验证；未向业务会话发消息。当前回合工具列表未热加载，不宣称原生工具已可直接调用。
+**2026-10-08 串消息核对 🟢**：14:36–14:44 seatalk/topic206/%33与code-anywhere/topic11/%35入站、原生记录、出站回执均对应；同一MCP说明分别发到三个话题，且Codex共享用户配置，未发现本时段误投。证据 `recon/wiki/session-routing-audit.md`。
+**2026-10-08 会话通信MCP上线 🟢**：用户要列表、发消息、发送后反馈（非仅忙闲状态）；已实现真实进程发现、公开摘要、持久request_id回执、空闲目标投递、原生消息确认，以及get_session_feedback最近消息/回复。新增代码 `src/agent_sessions.py`、`src/session_mcp.py`；反馈扩展后67测试通过；文档 `docs/session-mcp.md`，启动脚本 `scripts/session-mcp`；systemd已部署；真实stdio MCP初始化、3工具发现、6个活会话列表、apex反馈读取均通过。未向真实业务会话发送测试消息；忙/未知目标不投递、不自动排队。
