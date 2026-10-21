@@ -16,7 +16,7 @@ cd ~/workspace/code-anywhere
 |---|---|
 | deps | git / curl / tmux（系统包，给出 apt/brew 命令）、uv、claude、codex（需 node）、glab |
 | python | 用 uv 建 `.venv`，装 `requirements-mcp.txt`（含 `requirements.txt`） |
-| tools | `tools/` 下的 `t`、`tmux-tui`、`cc` → `~/.local/bin`，`tmux.conf` → `~/.tmux.conf`；已有且不同的先备份 |
+| tools | `tools/` 下的 `t`、`tmux-tui`、`cc`、`gitlab-upload` → `~/.local/bin`，`tmux.conf` → `~/.tmux.conf`；已有且不同的先备份 |
 | auth | Claude（`claude auth status` 或 `.env` 的 `ANTHROPIC_API_KEY`）、Codex（登录或 config.toml 网关） |
 | telegram | 验证 BOT_TOKEN（getMe）；你建群、开话题、设 bot 为管理员（含“管理话题”）并发一句话；自动识别 CHAT_ID 和你的 TG 用户 ID 写入 `.env`（ALLOWED_USERS 只放你自己） |
 | hooks | Claude hooks 写入 `~/.claude/settings.json` |

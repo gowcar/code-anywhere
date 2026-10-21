@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# gitlab-upload <group/repo> <文件>... —— 上传附件到 GitLab 仓库，输出可直接贴进 issue 的 markdown
+# 令牌读 ~/.config/gitlab-token，域名读 GITLAB_HOST（默认 git.garena.com）
+set -euo pipefail
+[ $# -ge 2 ] || { echo "用法: gitlab-upload <group/repo> <文件>..." >&2; exit 2; }
+host=${GITLAB_HOST:-git.garena.com}; repo=$1; shift
+token=$(tr -d '[:space:]' < "$HOME/.config/gitlab-token")
+project=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$repo")
+for f in "$@"; do
+  curl -fsS --header "PRIVATE-TOKEN: $token" -F "file=@$f" "https://$host/api/v4/projects/$project/uploads" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["markdown"])'
+done

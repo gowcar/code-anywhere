@@ -41,11 +41,21 @@ GITLAB_HOST=git.garena.com glab issue create -R <仓库> \
 <用户期望的行为>
 
 ## 附件
-<截图请先上传：glab 不支持直接附图，用 `glab api --method POST projects/:id/uploads -F file=@路径` 拿到 markdown 链接再贴入>
+<上传后的图片 markdown，见下方「截图」>
 
 ---
 由 issue-desk 根据用户 TG 反馈整理
 ```
+
+**截图（必须遵守）**：用户发的图片在本目录 `.attachments/` 下。提交前先上传到目标仓库，把输出的 markdown 原样放进正文：
+
+```sh
+gitlab-upload <仓库> .attachments/<文件名>     # 输出 ![名字](/uploads/...)，GitLab 页面里直接显示图片
+```
+
+- **正文里绝对不能出现服务器本地路径**（`/home/...`、`.attachments/...`）或主机名：别人看不到，还暴露服务器信息。
+- 上传失败就不附图，并在回复里告诉用户“截图上传失败：原因”，不要用路径代替。
+- 提交后用 `glab issue view <N> -R <仓库>` 复查一遍正文，确认没有本地路径。
 
 注意：issue 对团队可见。**不要写入**令牌、账号密码、会话 ID、用户隐私和聊天正文原文中的敏感内容。
 
