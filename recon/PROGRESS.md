@@ -192,6 +192,7 @@ log.exception("safe msg", exc_info=exc)                 → 安全（traceback �
 - ⚪ LLM 自动总结 session name（haiku，目前用户选择手动命名兜底）
 - ⚪ code-anywhere 自家 web admin（不依赖 runner-coach）
 ## 📒 决策日志
+- 2026-10-22 用户决策：外脑规则是 code-anywhere 能力的一部分，必须覆盖 Codex（已写入全局规则模板）；TG 入口改为私聊话题模式（整体切换，群留作存档），待用户在 BotFather 开启 bot 话题后验证并迁移。
 | 日期 | 决策 | 背景 | 影响 |
 |---|---|---|---|
 | 2026-08-13 | `@ca_project` 标签被污染成临时目录 → topic 1587 完全无反应（已手动修复，防护待做） | 用户报「TG 的 code-anywhere topic 没反应」。pane `code-anywhere:1.1` 里 claude 真实 cwd 正是 `~/workspace/github/code-anywhere`（`lsof -d cwd` 实证），但 `@ca_project` 标签写成了 `/var/folders/.../T/tmp.sdq5NB1Io1`。`_find_pane_for_project` 按标签匹配 → 找不到 pane → 消息投不进去。bot 轮询/收发全程正常（getUpdates 每 15s、其它 topic 照常），所以从外部看像「bot 挂了」，实际只有这一个 topic 哑掉 | 已 `tmux set-option -p -t code-anywhere:1.1 @ca_project <正确目录>` 修复，`_find_pane_for_project` 复验命中 `%30`，无需重启。**遗留**：① 标签为何被写成 tmp 目录未查明（疑似某次 claude 在临时目录启动，SessionStart hook 按当时 cwd 打标签后覆盖）② hook 打标签时应校验目录（存在 / 非 `/var/folders` 临时路径 / 是 git 仓库），或改用进程真实 cwd 兜底 ③ 这类「单 topic 哑掉」目前无任何告警，只能靠用户发现 —— 与 runner-coach 同类的静默失效 |

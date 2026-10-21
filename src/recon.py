@@ -59,7 +59,7 @@ _CLAUDE_TMPL = """# {{NAME}} — 项目协约
 本项目启用 `recon/` 外脑机制（防上下文压缩失忆）。**单一真相源 = `recon/PROGRESS.md`。**
 
 ## Session 纪律
-- 开局先读 `recon/PROGRESS.md` 的「📍 当前位置」（SessionStart 已自动注入其摘要）。
+- 开局先读 `recon/PROGRESS.md` 的「📍 当前位置」（Claude 由 SessionStart 自动注入摘要；Codex 需自己先读）。
 - 稳定知识查 `recon/wiki/`——**按需 Read 单篇，不要一次全读**（递进式加载省上下文）。
 - 做完一步实质工作 → **先回 PROGRESS 落一行再继续**（事件驱动，别攒到最后一次性写）。
 - 出结论标 🟢 + 资产路径；走不通标 🔴 + 原因；用户做决策 → 写决策日志（带日期）。

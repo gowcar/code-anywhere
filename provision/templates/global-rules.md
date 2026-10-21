@@ -1,3 +1,14 @@
+## recon 外脑（code-anywhere 能力，Claude 与 Codex 通用）
+
+项目根目录有 `recon/PROGRESS.md` 时，它就是这个项目的**单一真相源**，用来防止上下文压缩或重开会话后失忆：
+
+- **开局先读** `recon/PROGRESS.md` 的「📍 当前位置」。Claude 会由 SessionStart 自动注入摘要；**Codex 没有这个注入，必须自己先读**。
+- 稳定知识查 `recon/wiki/`，按需读单篇，不要一次全读。
+- 做完一步实质工作，**先回 PROGRESS 落一行再继续**；出结论标 🟢 加资产路径，走不通标 🔴 加原因，用户做的决策写进决策日志并带日期。
+- 防膨胀：PROGRESS 只放“活的”状态，全文 ≤ 250 行；稳定知识迁到 `recon/wiki/<主题>.md`，已结论的条目和旧决策归档到 `recon/decisions/archive.md`，PROGRESS 只留一行指针。
+- 图片、截图看过后把关键结论写成文字落盘，不要依赖“上下文里还留着那张图”。
+- 项目自己的 `AGENTS.md` / `CLAUDE.md` 有更细的规定时，以项目规定为准。
+
 ## 跨 session 沟通规则（local-sessions MCP，2026-10-19 用户要求）
 
 用 local-sessions 的 `send_message` 给其他 Codex/Claude 会话发消息时，消息正文只能是“一句话”：
