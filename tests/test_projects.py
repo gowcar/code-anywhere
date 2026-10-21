@@ -124,6 +124,17 @@ class DiscoverTests(unittest.TestCase):
         self.assertIn("alpha", names)
         self.assertNotIn("beta", names)
 
+    def test_exact_ignore_keeps_child_projects(self):
+        container = self.proj_a.parent
+        write_rollout(self.codex_home / "sessions", "container", str(container))
+        write_rollout(self.codex_home / "sessions", "a1", str(self.proj_a))
+        write_rollout(self.codex_home / "sessions", "b1", str(self.proj_b))
+        (self.root / ".projectignore").write_text(f"={container}\n")
+        paths = {p['path'] for p in projects.discover()}
+        self.assertNotIn(str(container), paths)
+        self.assertIn(str(self.proj_a), paths)
+        self.assertIn(str(self.proj_b), paths)
+
     def test_missing_dir_and_corrupt_rollout_are_skipped(self):
         """指向已删目录的 rollout、坏 JSON 都不能让发现流程炸掉"""
         write_rollout(self.codex_home / "sessions", "gone", str(self.root / "deleted"))

@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Read-only browser preflight. Exit 2 means do not add browser work."""
+import json
+import os
+from pathlib import Path
+
+
+def reasons(count, rss_kib, available_kib):
+    result = []
+    if count >= 32:
+        result.append('browser_processes >= 32')
+    if rss_kib >= 6 * 1024 * 1024:
+        result.append('browser_RSS >= 6 GiB (includes shared pages)')
+    if available_kib < 2 * 1024 * 1024:
+        result.append('MemAvailable < 2 GiB')
+    return result
+
+
+def main():
+    try:
+        memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+        available = int(memory['MemAvailable'].split()[0])
+        count = rss = 0
+        for process in Path('/proc').iterdir():
+            if not process.name.isdigit():
+                continue
+            try:
+                status = dict(line.split(':', 1) for line in (process / 'status').read_text().splitlines())
+                name = status['Name'].strip().lower()
+                if not any(token in name for token in ('chrome', 'chromium', 'firefox', 'webkit', 'msedge')):
+                    continue
+                count += 1
+                rss += int(status.get('VmRSS', '0 kB').split()[0])
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        blocked = reasons(count, rss, available)
+        print(json.dumps({'status': 'blocked' if blocked else 'ok', 'browser_processes': count,
+                          'browser_rss_gib': round(rss / 1024 / 1024, 2),
+                          'available_memory_gib': round(available / 1024 / 1024, 2),
+                          'reasons': blocked, 'note': 'Read-only snapshot; not a reservation or process killer.'}))
+        return 2 if blocked else 0
+    except (OSError, ValueError, KeyError) as error:
+        print(json.dumps({'status': 'unknown', 'detail': str(error)}))
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

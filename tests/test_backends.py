@@ -16,6 +16,88 @@ def item(kind, text, uid='msg-1'):
         'type': kind, 'id': uid, 'content': [{'type': 'Text', 'text': text}]}}}
 
 
+class ClaudeLaunchArgsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def write(self, name, mode):
+        (self.root / '.claude').mkdir(exist_ok=True)
+        (self.root / '.claude' / name).write_text(json.dumps({'permissions': {'defaultMode': mode}}))
+
+    def test_plain_claude_without_project_settings(self):
+        self.assertEqual(backends.claude_launch_args(str(self.root)), ['claude'])
+
+    def test_project_bypass_adds_cli_flag(self):
+        self.write('settings.json', 'bypassPermissions')
+        self.assertEqual(backends.claude_launch_args(str(self.root)),
+                         ['claude', '--dangerously-skip-permissions'])
+
+    def test_local_settings_override_shared_bypass(self):
+        self.write('settings.json', 'bypassPermissions')
+        self.write('settings.local.json', 'default')
+        self.assertEqual(backends.claude_launch_args(str(self.root)), ['claude'])
+
+
+class TrustPromptTests(unittest.TestCase):
+    CLAUDE = (" Quick safety check: Is this a project you created or one you trust?\n"
+              " ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel")
+    CODEX = ("  Trust this folder? Codex can read, edit, and run files here\n"
+             "› 1. Trust and continue\n  2. Quit\n  enter continue · esc quit")
+
+    def test_claude_default_is_exit(self):
+        self.assertEqual(bot._trust_prompt_state(self.CLAUDE), (True, False))
+        moved = self.CLAUDE.replace(' ❯ No, exit\n   Yes', '   No, exit\n ❯ Yes')
+        self.assertEqual(bot._trust_prompt_state(moved), (True, True))
+
+    def test_codex_default_is_trust(self):
+        self.assertEqual(bot._trust_prompt_state(self.CODEX), (True, True))
+
+    def test_normal_screen_has_no_prompt(self):
+        self.assertEqual(bot._trust_prompt_state('❯ \n  -- INSERT --'), (False, False))
+
+
+class HookSessionTests(unittest.TestCase):
+    def test_prefers_hook_registered_claude_session_for_pane(self):
+        sessions = {'old': {'tmux_pane': '%1', 'backend': 'codex'},
+                    'new': {'tmux_pane': '%1'}, 'other': {'tmux_pane': '%2'}}
+        with patch.dict(api_server.terminal_sessions, sessions, clear=True):
+            self.assertEqual(asyncio.run(bot._hook_session_for_pane('%1', wait=0.1)), 'new')
+            self.assertIsNone(asyncio.run(bot._hook_session_for_pane('%9', wait=0.1)))
+
+
+class ClaudeLateWatcherTests(unittest.TestCase):
+    def test_injection_offsets_pick_grown_log_not_newer_old_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            target, other = folder / 'target.jsonl', folder / 'other.jsonl'
+            target.write_text('{}\n'); other.write_text('{}\n')
+            with patch('src.projects.claude_dir', return_value=folder):
+                offsets = backends.claude_transcript_offsets('/p')
+            target.write_text('{}\n{"new": 1}\n')
+            os_time = target.stat().st_mtime - 100
+            import os; os.utime(target, (os_time, os_time))  # old session is "newer" by mtime
+            started = {}
+
+            async def fake_watch(sid, path, *args, start_pos=None):
+                started[sid] = start_pos
+
+            with patch('src.projects.claude_dir', return_value=folder), \
+                 patch('src.projects.get_topic', return_value=7), \
+                 patch.object(backends, 'get_backend', return_value='claude'), \
+                 patch.object(backends, 'pane_processes', AsyncMock(return_value=['claude'])), \
+                 patch.object(api_server, '_watch_transcript', fake_watch), \
+                 patch.object(api_server, '_bot', object()), \
+                 patch.object(api_server.config, 'CHAT_ID', 34), \
+                 patch.dict(api_server.terminal_sessions, {}, clear=True):
+                ok = asyncio.run(api_server.register_pane_watcher('%1', '/p', start_offsets=offsets))
+                self.assertTrue(ok)
+                self.assertEqual(api_server.terminal_sessions['target']['tmux_pane'], '%1')
+            self.assertEqual(started, {'target': 3})
+            api_server._watchers.pop('target', None)
+
+
 class PreferencesTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -110,6 +192,70 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         with path.open('a') as f: f.write(json.dumps(item('AgentMessage', 'inactive')) + '\n')
         await asyncio.wait_for(task, 2)
         api_server._bot.send_message.assert_not_awaited()
+
+    async def test_resuming_rollout_reads_only_bytes_after_input_snapshot(self):
+        await self._check_registration_snapshot(existing=True)
+
+    async def test_genuinely_new_rollout_keeps_first_reply(self):
+        await self._check_registration_snapshot(existing=False)
+
+    async def _check_registration_snapshot(self, existing):
+        cwd = self.temp.name
+        backends.set_backend(cwd, 'codex')
+        root = Path(cwd) / 'sessions'; root.mkdir()
+        path = root / 'rollout-test.jsonl'
+        old = json.dumps(item('AgentMessage', 'yesterday', 'old')) + '\n'
+        if existing:
+            path.write_text(old)
+        with patch('src.projects.codex_sessions_dir', return_value=root):
+            offsets = backends.codex_transcript_offsets()
+        with path.open('a') as f:
+            f.write(json.dumps(item('AgentMessage', 'new reply', 'new')) + '\n')
+        with patch.object(api_server.config, 'CHAT_ID', 34), \
+             patch.object(api_server.projects, 'get_topic', return_value=206), \
+             patch.object(backends, 'pane_processes', AsyncMock(return_value=['123'])), \
+             patch.object(backends, 'codex_transcript', AsyncMock(return_value=('sid', str(path)))), \
+             patch.object(backends, 'command', AsyncMock(return_value='full')):
+            self.assertTrue(await api_server.register_pane_watcher('%33', cwd, start_offsets=offsets))
+            task = api_server._watchers['sid']
+            try:
+                for _ in range(30):
+                    if api_server._bot.send_message.await_count:
+                        break
+                    await asyncio.sleep(.05)
+                api_server._bot.send_message.assert_awaited_once()
+                self.assertIn('new reply', api_server._bot.send_message.call_args.kwargs['text'])
+                self.assertNotIn('yesterday', api_server._bot.send_message.call_args.kwargs['text'])
+            finally:
+                task.cancel()
+                await task
+
+    async def test_missing_open_rollout_captures_offsets_before_injection(self):
+        cwd = self.temp.name; backends.set_backend(cwd, 'codex')
+        message = SimpleNamespace(
+            message_thread_id=206, chat_id=34, chat=SimpleNamespace(type='supergroup'),
+            text='new input', caption=None, photo=None, document=None, video=None,
+            audio=None, voice=None, sticker=None, reply_to_message=None,
+            message_id=100, reply_text=AsyncMock())
+        update = SimpleNamespace(message=message, effective_user=SimpleNamespace(id=77))
+        order = []
+        def snapshot():
+            order.append('snapshot'); return {'/old-rollout': 1234}
+        async def inject(*args): order.append('inject')
+        with patch.object(bot, 'auth_check', return_value=True), \
+             patch.object(bot.config, 'CHAT_ID', 34), \
+             patch.object(bot.projects, 'get_path', return_value=cwd), \
+             patch.object(bot, '_find_pane_for_project', AsyncMock(return_value='%33')), \
+             patch.object(backends, 'codex_transcript', AsyncMock(return_value=None)), \
+             patch.object(backends, 'codex_transcript_offsets', side_effect=snapshot), \
+             patch.object(bot, '_inject_tmux', side_effect=inject), \
+             patch.object(bot, 'start_typing'), \
+             patch.object(api_server, 'mark_tg_input'), \
+             patch.object(api_server, 'mark_tg_reply_target'), \
+             patch.object(api_server, 'register_pane_watcher', AsyncMock(return_value=True)) as register:
+            await bot._handle_message(update, SimpleNamespace(bot=object()))
+        self.assertEqual(order, ['snapshot', 'inject'])
+        register.assert_awaited_once_with('%33', cwd, start_offsets={'/old-rollout': 1234})
 
     async def test_stale_claude_hook_ignored_after_switch(self):
         cwd = self.temp.name; backends.set_backend(cwd, 'codex')

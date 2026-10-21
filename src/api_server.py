@@ -324,7 +324,7 @@ def retire_project_watchers(cwd: str, backend: str, keep_sid: str | None = None)
         terminal_sessions.pop(sid, None)
 
 
-async def register_pane_watcher(pane_id: str, cwd: str, from_start: bool = False) -> bool:
+async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str, int] | None = None) -> bool:
     if not _bot or not config.CHAT_ID:
         return False
     topic_id = projects.get_topic(cwd)
@@ -344,6 +344,9 @@ async def register_pane_watcher(pane_id: str, cwd: str, from_start: bool = False
         else:
             proj_path = projects.claude_dir(cwd)
             files = list(proj_path.glob("*.jsonl")) if proj_path else []
+            if start_offsets is not None:
+                # After an injection only the log that received it counts, never an older session.
+                files = [p for p in files if p.stat().st_size > start_offsets.get(str(p.resolve()), 0)]
             if files:
                 latest = max(files, key=lambda x: x.stat().st_mtime)
                 sid = latest.stem
@@ -388,9 +391,12 @@ async def register_pane_watcher(pane_id: str, cwd: str, from_start: bool = False
     if old:
         old.cancel()
     # Establish byte offset NOW, before callers can inject the first message.
+    file_size = latest.stat().st_size
+    start_pos = file_size if start_offsets is None else min(
+        start_offsets.get(str(latest.resolve()), 0), file_size)
     _watchers[sid] = asyncio.create_task(_watch_transcript(
-        sid, str(latest), topic_id, config.CHAT_ID, start_pos=0 if from_start else latest.stat().st_size))
-    log.info("[register_pane] %s %s pane=%s sid=%s topic=%s", backend, Path(cwd).name, pane_id, sid, topic_id)
+        sid, str(latest), topic_id, config.CHAT_ID, start_pos=start_pos))
+    log.info("[register_pane] %s %s pane=%s sid=%s topic=%s offset=%s", backend, Path(cwd).name, pane_id, sid, topic_id, start_pos)
     return True
 
 
@@ -460,8 +466,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import base64 as _b64
     import io as _io
-    import html as html_lib
-    from src.renderer import format_tool_use, split_message, send_ephemeral
+    from src.renderer import format_tool_use, split_message, split_user_message, send_ephemeral
 
     seen_ids = set()
     sent_image_tool_ids: set[str] = set()  # 已发图的 tool_use_id（按 sid 维度去重）
@@ -514,9 +519,20 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
     backend = terminal_sessions.get(session_id, {}).get("backend", "claude")
     cwd = terminal_sessions.get(session_id, {}).get("cwd", "")
     pane_check_counter = 0
+    from src import turn_status
+    if backend == "codex":
+        turn_status.bootstrap(session_id, path, last_pos)
+    next_failure_notice = 0.0
     try:
         while True:
             await asyncio.sleep(0.5)
+            if backend == "codex" and asyncio.get_running_loop().time() >= next_failure_notice:
+                next_failure_notice = asyncio.get_running_loop().time() + 5
+                try:
+                    await turn_status.notify_failure(_bot, session_id, Path(cwd).name, chat_id, topic_id)
+                except Exception:
+                    next_failure_notice = asyncio.get_running_loop().time() + 30
+                    log.warning("[watcher] failure notification delivery failed sid=%s", session_id, exc_info=True)
             if cwd and backends.get_backend(cwd) != backend:
                 break
             # 每 30 秒检查一次 pane 是否还活着
@@ -555,6 +571,17 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                     continue
 
                 if backend == "codex":
+                    lifecycle = turn_status.lifecycle(event)
+                    if lifecycle:
+                        current = turn_status.observe(session_id, event)
+                        # Suppress obsolete lifecycle events, including late completions.
+                        if (current.get("timestamp") != (lifecycle.get("timestamp") or current.get("timestamp"))
+                                or (lifecycle.get("turn_id") and current.get("turn_id") != lifecycle["turn_id"])):
+                            continue
+                        terminal_sessions.get(session_id, {})["turn_status"] = current
+                        if current.get("activity") in {"failed", "idle", "interrupted"}:
+                            from src.bot import stop_typing
+                            stop_typing(topic_id)
                     event = backends.normalize_codex(event)
                     if event is None:
                         continue
@@ -585,7 +612,14 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                     log.warning(f"[watcher] broadcast fail: {e}")
 
                 try:
-                    if event_type == "user":
+                    if event_type == "image_view" and backend == "codex":
+                        from src.image_delivery import send_viewed_attachment
+                        await send_viewed_attachment(
+                            _bot, event.get("path", ""),
+                            terminal_sessions.get(session_id, {}).get("cwd", ""),
+                            chat_id, topic_id,
+                        )
+                    elif event_type == "user":
                         content = event.get("message", {}).get("content", "")
                         text = ""
                         if isinstance(content, str):
@@ -681,14 +715,14 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             # 来源是 TG → TG 端已有用户气泡，skip 避免重复
                             # 来源是 web/终端真人 → 在 TG 永久显示 👤，保证 3 端历史一致
                             if _is_human and not _consume_tg_input(topic_id, text):
-                                truncated = html_lib.escape(text[:500])
                                 try:
-                                    await _bot.send_message(
-                                        chat_id=chat_id,
-                                        message_thread_id=topic_id,
-                                        text=f"👤 {truncated}",
-                                        parse_mode="HTML",
-                                    )
+                                    for chunk in split_user_message(text):
+                                        await _bot.send_message(
+                                            chat_id=chat_id,
+                                            message_thread_id=topic_id,
+                                            text=chunk,
+                                            parse_mode=None,
+                                        )
                                 except Exception as e:
                                     log.warning(f"[watcher] user echo 发送失败: {e}")
 
@@ -698,6 +732,13 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             if block.get("type") == "text":
                                 text = block.get("text", "").strip()
                                 if text:
+                                    if backend == "codex":
+                                        from src.image_delivery import send_linked_images
+                                        await send_linked_images(
+                                            _bot, text,
+                                            terminal_sessions.get(session_id, {}).get("cwd", ""),
+                                            chat_id, topic_id,
+                                        )
                                     # Claude 出真正的回复了 → 停掉注入路径的 typing
                                     try:
                                         from src.bot import stop_typing
@@ -710,7 +751,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                     for rendered, raw in chunks:
                                         send_kwargs = dict(
                                             chat_id=chat_id, message_thread_id=topic_id,
-                                            text=f"🤖 {rendered}",
+                                            text=f"✦ {rendered}",
                                             parse_mode="HTML",
                                         )
                                         if reply_to:
@@ -722,7 +763,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                             log.warning(f"[watcher] HTML 发送失败: {e}")
                                             from telegram.error import BadRequest
                                             if isinstance(e, BadRequest):
-                                                fb = {**send_kwargs, "text": f"🤖 {raw}"}
+                                                fb = {**send_kwargs, "text": f"✦ {raw}"}
                                                 fb.pop("parse_mode", None)
                                                 await _bot.send_message(**fb)
                                             else:
@@ -733,7 +774,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                                         connect_timeout=15,
                                                     )
                                                 except Exception:
-                                                    fb = {**send_kwargs, "text": f"🤖 {raw}"}
+                                                    fb = {**send_kwargs, "text": f"✦ {raw}"}
                                                     fb.pop("parse_mode", None)
                                                     await _bot.send_message(**fb)
                             elif block.get("type") == "tool_use":
@@ -1094,6 +1135,11 @@ async def handle_session_input(request: web.Request) -> web.Response:
 
 def create_api_app() -> web.Application:
     app = web.Application()
+    from src import agent_sessions
+    app.router.add_get("/agent/sessions", agent_sessions.handle_list)
+    app.router.add_get("/agent/sessions/{id}", agent_sessions.handle_status)
+    app.router.add_get("/agent/sessions/{id}/feedback", agent_sessions.handle_feedback)
+    app.router.add_post("/agent/sessions/{id}/messages", agent_sessions.handle_send)
     # Hook callbacks
     app.router.add_post("/session_start", handle_session_start)
     app.router.add_post("/session_stop", handle_session_stop)

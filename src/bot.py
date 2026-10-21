@@ -283,16 +283,28 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         return
-    from src.api_server import terminal_sessions
-    lines = ["<b>活跃会话</b>\n"]
-    for sid, info in terminal_sessions.items():
-        name = html_lib.escape(Path(info["cwd"]).name)
-        engine = info.get("backend", "claude")
-        model = html_lib.escape(info.get("model") or engine)
-        lines.append(f"🟢 {name} · {model} ({sid[:8]})")
-    if not terminal_sessions:
-        lines.append("（暂无）")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    from src.agent_sessions import discover
+    labels = {'running': ('🟢', '进行中'), 'retrying': ('🟡', '重试中'),
+              'waiting_input': ('⚪', '空闲'), 'failed': ('🔴', '上一轮失败'),
+              'waiting_confirmation': ('🟡', '等待确认'), 'unknown': ('⚪', '状态不明')}
+    sessions = await discover()
+    lines = ["<b>会话状态</b>\n"]
+    for session in sessions:
+        activity = session.get('activity', session['status'])
+        icon, label = labels.get(activity, ('⚪', activity))
+        name = html_lib.escape(session['project'])
+        model = html_lib.escape(session.get('model') or session['backend'])
+        lines.append(f"{icon} {name} · {label} · {model}")
+        last = session.get('last_turn', {})
+        if last.get('timestamp'):
+            lines.append('  最后状态事件：' + html_lib.escape(last['timestamp']))
+        if activity in {'failed', 'retrying'} and last.get('error'):
+            lines.append('  ' + html_lib.escape(last['error']['reason']))
+    if not sessions:
+        lines.append("（暂无活跃会话）")
+    from src.renderer import split_message
+    for chunk, _raw in split_message("\n".join(lines), render=False):
+        await update.message.reply_text(chunk, parse_mode='HTML')
 
 
 # ============ Callback ============
@@ -444,6 +456,61 @@ async def _pane_has_backend(pane_id: str, cwd: str) -> bool:
     return bool(await backends.pane_processes(pane_id, backends.get_backend(cwd)))
 
 
+# 新目录首启的信任框：Claude 默认选中 "No, exit"，Codex 默认 "Trust and continue"。
+# 注入的首条消息 + Enter 会被当成选择 → 消息丢失甚至 CLI 退出，所以先显式选“信任”。
+_TRUST_CHOICES = ("Yes, I trust this folder", "Trust and continue")
+
+
+def _trust_prompt_state(screen: str) -> tuple[bool, bool]:
+    """(信任框是否在屏, 当前光标是否已在“信任”选项上)"""
+    lines = screen.splitlines()
+    if not any(choice in line for line in lines for choice in _TRUST_CHOICES):
+        return False, False
+    selected = [line for line in lines if line.lstrip().startswith(("❯", "›"))]
+    return True, any(choice in line for line in selected for choice in _TRUST_CHOICES)
+
+
+async def _capture_pane(pane_id: str) -> str:
+    try:
+        return await backends.command("tmux", "capture-pane", "-p", "-t", pane_id)
+    except Exception:
+        return ""
+
+
+async def _accept_trust_prompt(pane_id: str, wait: float = 4.0) -> bool:
+    """Bridge-launched projects are bound topics the user already chose; accept folder trust."""
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        shown, on_trust = _trust_prompt_state(await _capture_pane(pane_id))
+        if shown:
+            for _ in range(3):
+                if on_trust:
+                    break
+                await backends.command("tmux", "send-keys", "-t", pane_id, "Down")
+                await asyncio.sleep(0.3)
+                shown, on_trust = _trust_prompt_state(await _capture_pane(pane_id))
+            if not on_trust:
+                log.warning(f"[ensure_pane] pane={pane_id} 信任框未能选中“信任”，放弃")
+                return False
+            await backends.command("tmux", "send-keys", "-t", pane_id, "Enter")
+            log.info(f"[ensure_pane] pane={pane_id} 已接受目录信任")
+            await asyncio.sleep(2.0)
+            return True
+        await asyncio.sleep(0.5)
+    return True
+
+
+async def _hook_session_for_pane(pane_id: str, wait: float = 8.0) -> str | None:
+    from src.api_server import terminal_sessions
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        for sid, info in list(terminal_sessions.items()):
+            if info.get("tmux_pane") == pane_id and info.get("backend", "claude") == "claude":
+                return sid
+        await asyncio.sleep(0.5)
+    return None
+
+
 async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None) -> str | None:
     """Start the selected native CLI in tmux, then attach its transcript watcher."""
     try:
@@ -492,7 +559,7 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
             "tmux", "new-window", "-t", tmux_session, "-c", norm_cwd, "-n", proj_name,
             *tmux_env_args,
             "-P", "-F", "#{pane_id}",
-            *(backends.codex_launch_args(cwd) if backend == "codex" else ["claude"]),
+            *(backends.codex_launch_args(cwd) if backend == "codex" else backends.claude_launch_args(cwd)),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await proc.communicate()
@@ -532,11 +599,17 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     if not ready:
         log.warning(f"[ensure_pane] pane={pane_id} {backend} 未在 15s 内就绪")
         return None
+    if not await _accept_trust_prompt(pane_id):
+        return None
 
     # 主动给这个 pane 注册 watcher — 不依赖 SessionStart hook 自动触发
     # （新 pane 起 claude 时 hook 不总是能触发，具体原因未知；直接注册最可靠）
     try:
         from src.api_server import register_pane_watcher
+        # Claude's SessionStart hook reports the NEW session (its jsonl may not exist until the
+        # first prompt). Globbing the newest jsonl would pick an old session or nothing at all.
+        if backend == "claude" and await _hook_session_for_pane(pane_id):
+            return pane_id
         # Fresh Codex writes its rollout only after the first user prompt.
         if backend == "claude" or await backends.codex_transcript(pane_id, norm_cwd):
             if not await register_pane_watcher(pane_id, norm_cwd):
@@ -559,6 +632,7 @@ async def _find_pane_for_project(cwd: str) -> str | None:
     """
     try:
         norm_cwd = str(Path(cwd).resolve())
+        await backends.infer_live_backend(cwd)
     except Exception:
         return None
 
@@ -774,6 +848,25 @@ def _build_file_prompt(rel_path: str, ext: str, caption: str) -> str:
 
 
 _project_locks: dict[str, asyncio.Lock] = {}
+_media_groups: dict[tuple, dict] = {}
+MEDIA_GROUP_QUIET_SECONDS = 1.2
+
+
+async def _flush_media_group(key):
+    """TG sends album items separately, without an end marker; wait for quiet."""
+    batch = _media_groups[key]
+    while True:
+        remaining = MEDIA_GROUP_QUIET_SECONDS - (time.monotonic() - batch["updated"])
+        if remaining <= 0:
+            break
+        await asyncio.sleep(remaining)
+    _media_groups.pop(key, None)
+    updates = sorted(batch["updates"].values(), key=lambda u: u.message.message_id)
+    update = updates[0]
+    if _update_cwd(update) != batch["cwd"]:
+        await update.message.reply_text("⚠️ 相册接收期间项目绑定改变，请重新发送相册。")
+        return
+    await _deliver_message(update, batch["context"], [u.message for u in updates])
 
 
 def _update_cwd(update: Update) -> str | None:
@@ -785,19 +878,36 @@ def _update_cwd(update: Update) -> str | None:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    group = getattr(message, "media_group_id", None)
+    cwd = _update_cwd(update)
+    if group and cwd and auth_check(update.effective_user.id):
+        key = (message.chat_id, message.message_thread_id, update.effective_user.id, group)
+        batch = _media_groups.get(key)
+        if batch is None:
+            batch = {"cwd": cwd, "context": context, "updates": {}, "updated": time.monotonic()}
+            _media_groups[key] = batch
+            context.application.create_task(_flush_media_group(key), update=update)
+        batch["updates"][message.message_id] = update
+        batch["updated"] = time.monotonic()
+        return
+    await _deliver_message(update, context)
+
+
+async def _deliver_message(update, context, album_messages=None):
     cwd = _update_cwd(update)
     if not cwd:
-        return await _handle_message(update, context)
+        return await _handle_message(update, context, album_messages)
     async with _project_locks.setdefault(cwd, asyncio.Lock()):
         try:
-            await _handle_message(update, context)
+            await _handle_message(update, context, album_messages)
         except Exception:
             log.exception("[msg] delivery failed project=%s", cwd)
             stop_typing(update.message.message_thread_id or update.message.chat_id)
             await update.message.reply_text("⚠️ 消息投递失败，请查看 /model 和服务日志后重试。")
 
 
-async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, album_messages=None):
     if not auth_check(update.effective_user.id):
         user = update.effective_user
         await update.message.reply_text(
@@ -855,14 +965,26 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 处理文件附件
     if has_file:
-        rel_path, ext, err = await _download_attachment(message, context, cwd)
-        if err:
-            await message.reply_text(err)
-            return
-        if not rel_path:
-            # 静默忽略（如贴纸）
-            return
-        text = _build_file_prompt(rel_path, ext, text)
+        if album_messages:
+            refs, captions = [], []
+            for part in album_messages:
+                rel_path, ext, err = await _download_attachment(part, context, cwd)
+                if err or not rel_path:
+                    await message.reply_text(f"⚠️ 相册未投递：{err or '附件无法读取'}，请整组重发。")
+                    return
+                refs.append(f"@{rel_path}")
+                if part.caption and part.caption not in captions:
+                    captions.append(part.caption)
+            text = "\n".join(refs + (captions or ["看看这些附件"]))
+        else:
+            rel_path, ext, err = await _download_attachment(message, context, cwd)
+            if err:
+                await message.reply_text(err)
+                return
+            if not rel_path:
+                # 静默忽略（如贴纸）
+                return
+            text = _build_file_prompt(rel_path, ext, text)
         # 给用户反馈：文件已收到，正在处理
         await message.reply_text("📎 文件已接收，正在读取分析...")
 
@@ -894,12 +1016,23 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Always verify the actual Codex rollout before injecting a message.
     # Existing terminals can change sessions independently of the bot.
     codex_first_turn = False
+    codex_start_offsets = None
     if backends.get_backend(cwd) == "codex":
         from src.api_server import register_pane_watcher
         codex_first_turn = not await backends.codex_transcript(target_pane, cwd)
+        if codex_first_turn:
+            # No open rollout may mean a RESUMING CLI, not a new conversation.
+            codex_start_offsets = backends.codex_transcript_offsets()
         if not codex_first_turn and not await register_pane_watcher(target_pane, cwd):
             await message.reply_text("⚠️ 尚未找到 Codex 会话日志，请在终端完成启动后重试。")
             return
+
+    # Claude pane 未被监听（如服务重启时 jsonl 尚未生成）：记下投递前偏移，投递后再接上，避免漏转回复
+    claude_start_offsets = None
+    if backends.get_backend(cwd) == "claude":
+        from src.api_server import terminal_sessions
+        if not any(v.get("tmux_pane") == target_pane for v in terminal_sessions.values()):
+            claude_start_offsets = backends.claude_transcript_offsets(cwd)
 
     # 标记：来源=TG（watcher 跳过 user event ephemeral 避免重复）+ 本轮首条 assistant text 应 quote-reply 到这条用户消息
     if not is_private and topic_id:
@@ -908,9 +1041,14 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mark_tg_reply_target(topic_id, message.message_id)
     start_typing(context.bot, chat_id, session_key)
     await _inject_tmux(target_pane, text)
+    if claude_start_offsets is not None:
+        from src.api_server import register_pane_watcher
+        if not await register_pane_watcher(target_pane, cwd, start_offsets=claude_start_offsets):
+            stop_typing(session_key)
+            await message.reply_text("⚠️ 已投递，但尚未找到 Claude 会话日志，回复可能不会转发；请检查终端。")
     if codex_first_turn:
-        # Replay only this freshly created rollout, so fast first replies cannot be lost.
-        if not await register_pane_watcher(target_pane, cwd, from_start=True):
+        # Consume only bytes added since input; old resumed history must never replay.
+        if not await register_pane_watcher(target_pane, cwd, start_offsets=codex_start_offsets):
             stop_typing(session_key)
             await message.reply_text("⚠️ 已投递，但 Codex 尚未生成日志；请检查终端的启动提示。")
 
@@ -1003,48 +1141,11 @@ async def sync_all_projects(bot, chat_id: int):
 
     from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter
 
-    # 工作目录已删除 → 删 TG topic + 清 state（保持与磁盘一致）
-    for topic_id in list(projects.all_bindings().keys()):
-        path = projects.get_path(topic_id)
-        if not path or Path(path).is_dir():
-            continue
-        topic_name = Path(path).name
-        log.info(f"[sync] 工作目录消失 → 清理 topic {topic_id} ({topic_name}): {path}")
-        deleted_ok = True
-        try:
-            await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=topic_id)
-        except BadRequest as e:
-            err = str(e).lower()
-            if "thread" in err and ("not found" in err or "invalid" in err):
-                pass  # 已经被手动删了，照样清 state
-            else:
-                log.warning(f"[sync] delete_forum_topic BadRequest，仍清理 state: {e}")
-        except (TimedOut, NetworkError, RetryAfter) as e:
-            log.warning(f"[sync] delete_forum_topic 瞬态错误，下次再试: {e}")
-            deleted_ok = False
-        except Exception as e:
-            log.warning(f"[sync] delete_forum_topic 失败，仍清理 state: {e}")
-        if deleted_ok:
-            await _purge_topic_state(topic_id, path)
-
-    # 再验证 TG 端 topic 是否还存在（用户可能手动删了 topic 但磁盘还在）
-    # 策略：unpinAllForumTopicMessages — 完全静默无副作用，话题不存在时抛 BadRequest
-    for topic_id in list(projects.all_bindings().keys()):
-        path = projects.get_path(topic_id)
-        topic_name = Path(path).name if path else "unknown"
-        try:
-            await bot.unpin_all_forum_topic_messages(chat_id=chat_id, message_thread_id=topic_id)
-        except BadRequest as e:
-            err = str(e).lower()
-            if "thread" in err and ("not found" in err or "invalid" in err):
-                log.info(f"[sync] 话题 {topic_id} 已不存在，清理绑定 ({topic_name}): {e}")
-                projects.unbind(topic_id)
-            else:
-                log.warning(f"[sync] 话题 {topic_id} 验证 BadRequest 但保留绑定: {e} ({topic_name})")
-        except (TimedOut, NetworkError, RetryAfter) as e:
-            log.warning(f"[sync] 话题 {topic_id} 验证瞬态错误，保留绑定: {e} ({topic_name})")
-        except Exception as e:
-            log.warning(f"[sync] 话题 {topic_id} 验证未知错误，保留绑定: {e} ({topic_name})")
+    # Missing paths may be renames, unmounted disks, or temporary outages.
+    # Discovery must never delete Telegram history or unpin user messages.
+    for topic_id, path in projects.all_bindings().items():
+        if path and not Path(path).is_dir():
+            log.warning("[sync] directory missing; preserving topic=%s path=%s", topic_id, path)
 
     all_projects = projects.discover()
 
@@ -1072,13 +1173,13 @@ async def sync_all_projects(bot, chat_id: int):
     bound_paths = set()
     bound_names = {}  # name → count，用于检测同名项目
     for tid, path in projects.all_bindings().items():
-        bound_paths.add(path)
+        bound_paths.add(str(Path(path).resolve()))
         name = Path(path).name
         bound_names[name] = bound_names.get(name, 0) + 1
 
     log.info(f"[sync] 发现 {len(unbound)} 个未绑定项目，已绑定路径数: {len(bound_paths)}")
     for p in unbound:
-        if p["path"] in bound_paths:
+        if str(Path(p["path"]).resolve()) in bound_paths:
             log.info(f"[sync] 跳过 {p['name']}（路径已绑定）")
             continue
         # 同名项目用父目录区分话题名
@@ -1096,7 +1197,7 @@ async def sync_all_projects(bot, chat_id: int):
             # 发送欢迎消息 + 历史会话列表
             await _send_topic_welcome(bot, chat_id, topic.message_thread_id, topic_name, p["path"])
             bound_names[p["name"]] = name_count + 1
-            bound_paths.add(p["path"])
+            bound_paths.add(str(Path(p["path"]).resolve()))
             log.info(f"[sync] {topic_name} → topic {topic.message_thread_id}")
             # 间隔避免 flood control
             await asyncio.sleep(2)
@@ -1110,7 +1211,7 @@ async def sync_all_projects(bot, chat_id: int):
                 state.set_cwd(topic.message_thread_id, p["path"])
                 await _send_topic_welcome(bot, chat_id, topic.message_thread_id, topic_name, p["path"])
                 bound_names[p["name"]] = name_count + 1
-                bound_paths.add(p["path"])
+                bound_paths.add(str(Path(p["path"]).resolve()))
                 log.info(f"[sync] {p['name']} → topic {topic.message_thread_id} (重试成功)")
             except Exception as e2:
                 log.warning(f"[sync] {p['name']} 重试也失败: {e2}")

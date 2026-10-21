@@ -54,6 +54,38 @@ def set_backend(cwd: str, backend: str) -> None:
     temp.replace(PREFERENCES_FILE)
 
 
+async def infer_live_backend(cwd: str) -> None:
+    """Initialize an unset project from its exact live terminal directory.
+
+Explicit preferences win. Mixed Claude/Codex processes are ambiguous, so do
+not guess. Never infer a parent project's backend from a child directory.
+"""
+    root = Path(cwd).resolve()
+    data = json.loads(PREFERENCES_FILE.read_text()) if PREFERENCES_FILE.exists() else {}
+    if str(root) in data:
+        return
+    aliases = {value for key, value in data.items() if Path(key).resolve() == root}
+    if len(aliases) == 1:
+        set_backend(cwd, aliases.pop())
+        return
+    if aliases:
+        return
+    rows = await command('tmux', 'list-panes', '-aF', '#{pane_id}\t#{pane_current_path}')
+    live = set()
+    for row in rows.splitlines():
+        pane, sep, directory = row.partition('\t')
+        if not sep or not directory or Path(directory).resolve() != root:
+            continue
+        for backend in ('codex', 'claude'):
+            if await pane_processes(pane, backend):
+                live.add(backend)
+    if len(live) == 1:
+        # Re-read after subprocess awaits: do not overwrite a concurrent choice.
+        current = json.loads(PREFERENCES_FILE.read_text()) if PREFERENCES_FILE.exists() else {}
+        if str(root) not in current:
+            set_backend(cwd, live.pop())
+
+
 async def command(*args: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -106,13 +138,36 @@ item_completed events. lsof is present on the supported macOS host.
                     continue
                 if isinstance(payload.get("source"), dict):
                     continue  # sub-agent rollouts must not replace the terminal's main thread
-                if Path(payload["cwd"]).resolve() == Path(cwd).resolve():
+                recorded_cwd = Path(payload["cwd"])
+                requested_cwd = Path(cwd).resolve()
+                matches = recorded_cwd.resolve() == requested_cwd
+                if not matches and not recorded_cwd.exists():
+                    # An open process survives a directory rename, while its
+                    # immutable rollout metadata still contains the old path.
+                    # Only the actual owning process's cwd can prove the move.
+                    try:
+                        matches = Path(f"/proc/{pid}/cwd").resolve(strict=True) == requested_cwd
+                    except OSError:
+                        pass
+                if matches:
                     sid = payload.get("id") or payload.get("session_id")
                     if sid:
                         return sid, str(path)
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
             continue
     return None
+
+
+def codex_transcript_offsets() -> dict[str, int]:
+    """Snapshot existing logs before input, even while a resumed CLI is starting."""
+    from src.projects import codex_sessions_dir
+    offsets = {}
+    for path in codex_sessions_dir().rglob("*.jsonl"):
+        try:
+            offsets[str(path.resolve())] = path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return offsets
 
 
 def codex_launch_args(cwd: str, resume_id: str | None = None, model: str | None = None) -> list[str]:
@@ -134,6 +189,35 @@ def codex_launch_args(cwd: str, resume_id: str | None = None, model: str | None 
     return args
 
 
+def claude_transcript_offsets(cwd: str) -> dict[str, int]:
+    """Sizes of a project's Claude logs before input; files created later start at 0."""
+    from src import projects
+    folder = projects.claude_dir(cwd)
+    offsets = {}
+    for path in (folder.glob("*.jsonl") if folder else []):
+        try:
+            offsets[str(path.resolve())] = path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return offsets
+
+
+def claude_launch_args(cwd: str) -> list[str]:
+    """Claude ignores settings-only bypassPermissions; honor it with the CLI flag."""
+    args = ["claude"]
+    claude_dir = Path(cwd).resolve() / ".claude"
+    for name in ("settings.local.json", "settings.json"):
+        try:
+            mode = json.loads((claude_dir / name).read_text()).get("permissions", {}).get("defaultMode")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if mode:
+            if mode == "bypassPermissions":
+                args.append("--dangerously-skip-permissions")
+            break
+    return args
+
+
 def normalize_codex(event: dict) -> dict | None:
     """Convert public conversation items to the existing TG / web event schema.
 
@@ -148,14 +232,15 @@ messages. Current CLI uses item_completed; older rollouts use agent_message.
     if event.get("type") != "event_msg":
         return None
     kind = payload.get("type")
-    if kind in {"task_complete", "task_completed", "turn_aborted"}:
-        return {"type": "result", "subtype": kind}
-    if kind == "error":
-        return {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "⚠️ Codex: " + str(payload.get("message", "运行失败"))}]}}
+    from src.turn_status import lifecycle
+    state = lifecycle(event)
+    if state:
+        return state
     item = payload.get("item", {}) if kind == "item_completed" else {}
     item_type = item.get("type")
     uid = item.get("id")
+    if item_type == "ImageView" and uid:
+        return {"type": "image_view", "uuid": uid, "path": item.get("path", "")}
     if item_type in {"UserMessage", "AgentMessage"}:
         text = "\n".join(c.get("text", "") for c in item.get("content", [])
                          if c.get("type") in {"text", "Text"})

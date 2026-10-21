@@ -126,6 +126,35 @@ def md_to_tg_html(text: str) -> str:
     return text.strip()
 
 
+def split_user_message(text: str) -> list[str]:
+    """Plain-text chunks; simplify transport headers without changing the body."""
+    prefix = "› "
+    agent = re.match(
+        r'\A\[Agent message [A-Za-z0-9_.:-]{1,128} from ([^\[\]\r\n]{1,80})\]\r?\n',
+        text,
+    )
+    if agent:
+        sender = agent.group(1)
+        if sender.lower() in {"agent", "unknown", "bot"}:
+            sender = "来源未识别（旧客户端）"
+        prefix = f"⇢ from {sender}\n\n"
+        text = text[agent.end():]
+    budget = 4000 - len(prefix.encode("utf-16-le")) // 2
+    chunks = []
+    start = 0
+    units = 0
+    for index, char in enumerate(text):
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > budget:
+            chunks.append(prefix + text[start:index])
+            start = index
+            units = 0
+        units += width
+    if start < len(text):
+        chunks.append(prefix + text[start:])
+    return chunks
+
+
 def split_message(text: str, render: bool = True) -> list[tuple[str, str]]:
     """将长文本拆分为 ≤4096 字符的段，返回 [(html, raw), ...]"""
     if render:

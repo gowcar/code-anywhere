@@ -175,7 +175,7 @@ _TMP_ROOTS = ("/tmp", "/var/tmp")
 def _is_ignored(path: str) -> bool:
     """home 本身和临时目录只是"跑过 CLI 的地方"，不是项目——否则每个 topic 列表都会被它们刷屏
 
-    额外排除项写进 PROJECT_ROOT/.projectignore，一行一个绝对路径（# 开头为注释）。
+    .projectignore 中绝对路径排除子树；=绝对路径仅排除目录本身，# 为注释。
     """
     p = Path(path)
     if p == Path.home():
@@ -190,6 +190,10 @@ def _is_ignored(path: str) -> bool:
             for line in ignore_file.read_text().splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
+                    continue
+                if line.startswith("="):
+                    if p == Path(line[1:].strip()):
+                        return True
                     continue
                 if p == Path(line) or p.is_relative_to(Path(line)):
                     return True
