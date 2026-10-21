@@ -64,3 +64,7 @@ logs/*.json
 # Topic original names for status emoji
 .topic-names.json
 .topic-names.tmp
+
+# Live status card ids (cleanup after restart)
+.liveness-cards.json
+.liveness-cards.tmp

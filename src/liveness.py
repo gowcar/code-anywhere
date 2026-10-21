@@ -26,12 +26,13 @@ CARD_AFTER = 15      # 一轮超过这么久才出状态卡，快速回答不打
 CARD_EVERY = 15      # 没有工具调用时（如长时间思考）状态卡的刷新间隔
 MOVE_EVERY = 45      # 状态卡挪到底部（删旧发新）的最小间隔，太频繁会触发 TG 限流
 TOOL_LINES = 4       # 卡片里滚动显示的最近动作条数
-BUDGET = 8           # 状态卡/改名每分钟最多占用的 TG 调用次数（群组共用约 20 条/分钟，优先留给正式回复）
+BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞上限流会整体暂停，正式回复遇限流会等待重发
 SPINNER = "◐◓◑◒"
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
 TITLE_GAP = 60       # 同一话题两次改名的最小间隔
 NAMES_FILE = PROJECT_ROOT / ".topic-names.json"
+CARDS_FILE = PROJECT_ROOT / ".liveness-cards.json"  # 当前卡片编号：重启后据此清掉旧卡，保证每个话题只有一张
 
 EMOJI = {"running": "🟢", "waiting": "🟡", "retrying": "🔴", "stalled": "🔴", "idle": ""}
 _KNOWN_PREFIX = re.compile(r"^(?:🟢|🟡|🔴|🟠|⚪)\s*")
@@ -186,6 +187,16 @@ def remember_topic_name(topic_id: int, name: str) -> None:
     _save_names()
 
 
+def _save_cards() -> None:
+    cards = {str(t.topic_id): t.card_id for t in _topics.values() if t.card_id}
+    try:
+        tmp = CARDS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cards))
+        tmp.replace(CARDS_FILE)
+    except OSError:
+        log.warning("[liveness] 保存卡片编号失败", exc_info=True)
+
+
 def card_text(topic: Topic, now: float) -> str:
     snap = topic.snapshot
     took = snap.elapsed or human_elapsed(now - (topic.turn_started or now))
@@ -257,6 +268,14 @@ class Monitor:
             log.warning("[liveness] TG 限流，暂停 %.0f 秒", seconds + 5)
 
     async def run(self):
+        # 上次运行留下的状态卡：重启后没人再更新它，先删掉，保证每个话题只有一张
+        try:
+            leftovers = json.loads(CARDS_FILE.read_text())
+        except (OSError, ValueError):
+            leftovers = {}
+        for message_id in leftovers.values():
+            await self._delete(message_id)
+        _save_cards()
         # 重启前改过名的话题（如还挂着 🟢）先纳入检查，状态稳定后自动恢复
         for tid, entry in _load_names().items():
             if entry.get("applied") != entry.get("base"):
@@ -330,6 +349,7 @@ class Monitor:
             if topic.card_id:  # 正常结束：回答本身已说明完成，卡片删掉
                 await self._delete(topic.card_id)
                 topic.card_id = None
+                _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
         if not topic.turn_started or (not force and now - topic.turn_started < CARD_AFTER):
@@ -348,11 +368,13 @@ class Monitor:
             await self._delete(topic.card_id)  # 后面有了新消息：删掉旧卡，在底部重发
             topic.card_id = None
         if topic.card_id:  # 编辑时必须带上按钮，否则 TG 会把按钮清掉
-            await self._edit(topic.card_id, text, markup=buttons(topic.topic_id))
+            if not await self._edit(topic.card_id, text, markup=buttons(topic.topic_id)):
+                topic.card_id = None  # 卡片已不存在（被删或过旧）：下次重发
         else:
             topic.card_id = await self._send(topic.topic_id, text, silent=True, markup=buttons(topic.topic_id))
             topic.card_posted = now
             topic.card_activity = _activity.get(topic.topic_id, 0)
+            _save_cards()
         topic.card_updated = now
 
     async def send_alert(self, topic: Topic, now: float):
@@ -392,15 +414,19 @@ class Monitor:
             self._note_error(exc)
             return None
 
-    async def _edit(self, message_id: int, text: str, markup=None):
+    async def _edit(self, message_id: int, text: str, markup=None) -> bool:
+        """返回 False 表示这条消息已经不存在，调用方应改为重发。"""
         try:
             self._spend()
             await self.bot.edit_message_text(chat_id=self.chat_id, message_id=message_id, text=text,
                                              reply_markup=markup)
         except Exception as exc:
+            if "not found" in str(exc).lower() or "message_id_invalid" in str(exc).lower():
+                return False
             if "not modified" not in str(exc):
                 log.warning("[liveness] 编辑失败 msg=%s: %s", message_id, exc)
             self._note_error(exc)
+        return True
 
     async def _delete(self, message_id: int):
         try:
@@ -432,6 +458,7 @@ def note_abort(topic_id: int) -> int | None:
     if not topic:
         return None
     card, topic.card_id, topic.turn_started = topic.card_id, None, None
+    _save_cards()
     return card
 
 

@@ -38,6 +38,7 @@ class MonitorTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         for p in (patch.object(liveness, "NAMES_FILE", Path(self.temp.name) / "names.json"),
+                  patch.object(liveness, "CARDS_FILE", Path(self.temp.name) / "cards.json"),
                   patch.object(liveness, "_names", None),
                   patch.dict(liveness._topics, {}, clear=True),
                   patch.dict(liveness._activity, {}, clear=True),
@@ -122,6 +123,14 @@ class MonitorTests(unittest.TestCase):
         self.at(0, snap())
         self.at(25, snap(tokens="↓ 2k"))
         self.assertEqual(self.bot.renamed, ["🟢 demo"])
+
+    def test_leftover_cards_deleted_on_start_and_only_one_card_per_topic(self):
+        liveness.CARDS_FILE.write_text('{"7": 55, "9": 66}')       # 上次运行留下的卡
+        asyncio.run(self._run_one_tick())
+        self.assertEqual(sorted(self.bot.deleted), [55, 66])
+        self.at(0, snap()); self.at(20, snap(tokens="↓ 2k")); self.at(40, snap(tokens="↓ 3k"))
+        self.assertEqual(len(self.bot.sent), 1)                    # 一直只有一张卡，原地更新
+        self.assertEqual(liveness.CARDS_FILE.read_text(), '{"7": 101}')
 
     def test_unknown_topic_name_is_never_touched(self):
         asyncio.run(self.mon.observe(8, snap(), 0, 1000))
