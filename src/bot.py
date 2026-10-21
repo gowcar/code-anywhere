@@ -280,6 +280,21 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ /status ============
 
+async def cmd_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """按 agent:* 状态汇总 GitLab issue；直接调 API，不经过模型。"""
+    if not auth_check(update.effective_user.id):
+        return
+    from src import issues
+    try:
+        text = issues.format_summary(await asyncio.to_thread(issues.fetch_open_issues))
+    except FileNotFoundError:
+        text = "还没有配置 GitLab 令牌（~/.config/gitlab-token），运行 ./setup --only gitlab"
+    except Exception as exc:
+        log.warning("[issues] 查询失败: %s", exc)
+        text = f"⚠️ 查询 GitLab 失败：{exc}"
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not auth_check(update.effective_user.id):
         return
@@ -1255,6 +1270,7 @@ def create_app() -> Application:
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
             BotCommand("status", "活跃会话"),
+            BotCommand("issues", "GitLab issue 状态汇总（待验证/处理中/待处理）"),
             BotCommand("trust", "项目信任开关"),
             BotCommand("whoami", "你的 ID"),
         ])
@@ -1283,6 +1299,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("issues", cmd_issues))
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     # 文本消息

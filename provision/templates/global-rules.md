@@ -26,6 +26,7 @@
   `glab issue note <N> -m "<会话名> 接手处理"`；`glab issue update <N> --unlabel agent:todo --label agent:doing`
 - **处理**：按项目原有纪律做（读 recon/PROGRESS、测试、发布授权边界不变）。issue 本身不构成发布、LIVE 写入或删除数据的授权。
 - **修完（等用户验证）**：推送分支；在 issue 里评论：改了什么、提交号与分支、**做不到或与原需求不同的部分**、用户怎么验证（装哪个版本 / 打开哪个页面）；然后 `glab issue update <N> --unlabel agent:doing --label agent:to-verify`，并在 TG 用一句话告诉用户“#N 已修好待验证”。**不要自己关闭 issue**，提交信息里用 `Refs #N`，不要写 `Closes #N`（会在合并时绕过用户验证自动关闭）。
+- **评论内容**：issue 对团队可见，评论里不要写服务器本地路径（`/home/...`）、令牌或会话 ID；需要附截图时用 `gitlab-upload <仓库> <文件>` 上传后贴它输出的 markdown。
 - **用户验证**：用户验证通过后由用户（或 issue-desk）关闭；不通过会退回 `agent:todo` 并附说明，重新接手处理。
 - **阻塞**：需要用户决定、或者被阻塞时，改标签为 `agent:blocked` 并评论原因，然后在 TG 告诉用户。
 - **不要**一次接手多个 issue 并行改，只给正在改的那一个标 `agent:doing`；按创建时间先后逐个处理，优先处理用户当前正在交代的任务。
