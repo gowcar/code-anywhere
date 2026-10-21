@@ -833,6 +833,16 @@ async def _send_tg(message, text: str):
 
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_VIDEO_SIZE = 20 * 1024 * 1024  # Bot API 下载上限
+_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg", ".3gp"}
+
+
+def _is_video_attachment(message) -> bool:
+    """视频只落盘不交给模型（用户要求）：TG 视频、圆形视频、以及视频类文件。"""
+    doc = message.document
+    return bool(message.video or getattr(message, "video_note", None)
+                or (doc and ((doc.mime_type or "").startswith("video/")
+                             or Path(doc.file_name or "").suffix.lower() in _VIDEO_EXT)))
 
 # 文件类型分类
 _IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
@@ -857,6 +867,8 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
     # 确定文件对象和文件名
     file_obj = None
     file_name = None
+    is_video = _is_video_attachment(message)
+    max_size = MAX_VIDEO_SIZE if is_video else MAX_FILE_SIZE
 
     if message.photo:
         # TG 图片：取最大尺寸
@@ -864,12 +876,11 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
         file_name = f"photo_{file_obj.file_unique_id}.jpg"
     elif message.document:
         doc = message.document
-        if doc.file_size and doc.file_size > MAX_FILE_SIZE:
-            return None, None, f"文件太大（{doc.file_size // 1024 // 1024}MB），限制 10MB"
         file_obj = doc
         file_name = doc.file_name or f"file_{doc.file_unique_id}"
-    elif message.video:
-        return None, None, "暂不支持视频文件"
+    elif message.video or getattr(message, "video_note", None):
+        file_obj = message.video or message.video_note
+        file_name = getattr(file_obj, "file_name", None) or f"video_{file_obj.file_unique_id}.mp4"
     elif message.audio or message.voice:
         return None, None, "暂不支持音频文件"
     elif message.sticker:
@@ -877,6 +888,8 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
 
     if not file_obj:
         return None, None, ""
+    if file_obj.file_size and file_obj.file_size > max_size:
+        return None, None, f"文件太大（{file_obj.file_size // 1024 // 1024}MB），下载上限 {max_size // 1024 // 1024}MB，未保存。"
 
     # 获取文件信息（带重试，防止偶发超时）
     tg_file = None
@@ -891,14 +904,16 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
             else:
                 return None, None, f"获取文件失败（重试3次）: {e}"
 
-    if tg_file.file_size and tg_file.file_size > MAX_FILE_SIZE:
-        return None, None, f"文件太大（{tg_file.file_size // 1024 // 1024}MB），限制 10MB"
+    if tg_file.file_size and tg_file.file_size > max_size:
+        return None, None, f"文件太大（{tg_file.file_size // 1024 // 1024}MB），下载上限 {max_size // 1024 // 1024}MB，未保存。"
 
-    # 构建本地路径
+    # 构建本地路径（视频放子目录：不参与图片的滚动清理）
     attachments_dir = Path(cwd) / ".attachments"
-    attachments_dir.mkdir(exist_ok=True)
+    if is_video:
+        attachments_dir /= "videos"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_name = file_name.replace("/", "_").replace(" ", "_")
     local_name = f"{ts}_{safe_name}"
     local_path = attachments_dir / local_name
@@ -906,10 +921,11 @@ async def _download_attachment(message, context, cwd: str) -> tuple[str | None, 
     try:
         await tg_file.download_to_drive(str(local_path), read_timeout=30, connect_timeout=15)
     except Exception as e:
+        local_path.unlink(missing_ok=True)  # 不留半截文件
         return None, None, f"下载文件失败: {e}"
 
     ext = Path(file_name).suffix.lower()
-    rel_path = f".attachments/{local_name}"
+    rel_path = local_path.relative_to(Path(cwd)).as_posix()
     log.info(f"[attachment] saved {rel_path} ({tg_file.file_size or '?'} bytes)")
     # 控上下文：清理旧附件，避免 .attachments 膨胀（图的价值应已由 claude 落盘成文字）
     n = recon.cleanup_attachments(cwd)
@@ -1006,6 +1022,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
     chat_id = message.chat_id
     is_private = message.chat.type == "private"
     has_file = bool(message.photo or message.document or message.video
+                    or getattr(message, "video_note", None)
                     or message.audio or message.voice or message.sticker)
 
     if not message.text and not has_file:
@@ -1049,15 +1066,23 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
     # 处理文件附件
     if has_file:
         if album_messages:
-            refs, captions = [], []
+            refs, captions, videos = [], [], []
             for part in album_messages:
                 rel_path, ext, err = await _download_attachment(part, context, cwd)
                 if err or not rel_path:
                     await message.reply_text(f"⚠️ 相册未投递：{err or '附件无法读取'}，请整组重发。")
                     return
-                refs.append(f"@{rel_path}")
+                if _is_video_attachment(part):
+                    videos.append(rel_path)
+                else:
+                    refs.append(f"@{rel_path}")
                 if part.caption and part.caption not in captions:
                     captions.append(part.caption)
+            if videos:
+                await message.reply_text("📎 视频已保存，未提交模型处理：\n" + "\n".join(str(Path(cwd) / v) for v in videos),
+                                         parse_mode=None)
+            if not refs:
+                return
             text = "\n".join(refs + (captions or ["看看这些附件"]))
         else:
             rel_path, ext, err = await _download_attachment(message, context, cwd)
@@ -1066,6 +1091,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
                 return
             if not rel_path:
                 # 静默忽略（如贴纸）
+                return
+            if _is_video_attachment(message):
+                await message.reply_text(f"📎 视频已保存，未提交模型处理。\n路径：{Path(cwd) / rel_path}", parse_mode=None)
                 return
             text = _build_file_prompt(rel_path, ext, text)
         # 给用户反馈：文件已收到，正在处理
@@ -1382,7 +1410,7 @@ def create_app() -> Application:
     # 文件附件（图片、文档等）
     app.add_handler(
         MessageHandler(
-            (filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO
+            (filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO
              | filters.VOICE | filters.Sticker.ALL)
             & (filters.ChatType.SUPERGROUP | filters.ChatType.PRIVATE),
             handle_message,
