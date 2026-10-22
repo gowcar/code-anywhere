@@ -69,6 +69,13 @@ def screen_state(screen):
             return 'running', 'terminal shows interruptible work'
         if re.search(r'Would you like to proceed|Do you want to proceed|Allow this|Approve once|Do you trust', line, re.I):
             return 'waiting_confirmation', 'terminal shows a confirmation prompt'
+    # Newer Claude Code no longer prints "esc to interrupt"; its spinner line
+    # ("· Simmering… (18s · ↓ 188 tokens)") is the evidence, while the empty
+    # input box stays visible during work and must not read as idle.
+    from src.abort import claude_running, codex_running
+    tail = '\n'.join(lines)
+    if claude_running(tail) or codex_running(tail):
+        return 'running', 'terminal shows a working spinner'
     if any(re.match(r'^\s*[›❯]\s*(Ask Codex to do anything)?\s*$', line) for line in lines):
         return 'waiting_input', 'terminal shows an empty input prompt (heuristic)'
     return 'unknown', 'no reliable status indicator visible'
@@ -77,8 +84,12 @@ def screen_state(screen):
 async def _transcript(pane, cwd, backend, pid):
     if backend == 'codex':
         return await backends.codex_transcript(pane, cwd)
-    # Claude does not always hold its transcript open. Prefer an exact resume
-    # argument, otherwise use only this live process's open transcript.
+    # Claude does not always hold its transcript open. Prefer the SessionStart
+    # hook's pane tag (it follows /clear, unlike a stale --resume argument),
+    # then an exact resume argument, then this live process's open transcript.
+    tagged = await backends.claude_session(pane, cwd)
+    if tagged and Path(tagged['transcript_path']).exists():
+        return tagged['session_id'], tagged['transcript_path']
     try:
         args = Path(f'/proc/{pid}/cmdline').read_bytes().decode().split('\0')
         sid = next((args[i + 1] for i, arg in enumerate(args[:-1])

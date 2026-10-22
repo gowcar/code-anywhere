@@ -36,6 +36,8 @@ class SessionToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.screen_state('Would you like to proceed?\n›')[0], 'waiting_confirmation')
         self.assertEqual(service.screen_state('Some unrelated log output')[0], 'unknown')
         self.assertEqual(service.screen_state('› Ask Codex to do anything')[0], 'waiting_input')
+        # 新版 Claude Code 干活时输入框照样显示，只有转圈那一行能说明在忙
+        self.assertEqual(service.screen_state('● 第 1 次完成。\n· Simmering… (18s · ↓ 188 tokens)\n' + '─' * 20 + '\n❯ \n' + '─' * 20)[0], 'running')
 
     async def test_busy_does_not_inject(self):
         self.session['status'] = 'running'
