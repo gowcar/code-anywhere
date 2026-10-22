@@ -692,6 +692,8 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                         if current.get("activity") in {"failed", "idle", "interrupted"}:
                             from src.bot import stop_typing
                             stop_typing(topic_id)
+                        if current.get("activity") == "idle":  # 正常完成才标 👌；失败/中断保持 👀
+                            liveness.turn_finished(topic_id)
                     event = backends.normalize_codex(event)
                     if event is None:
                         continue
@@ -943,6 +945,7 @@ async def handle_session_stop(request: web.Request) -> web.Response:
         try:
             from src.bot import stop_typing
             stop_typing(info["topic_id"])
+            liveness.turn_finished(info["topic_id"])
         except Exception:
             pass
 

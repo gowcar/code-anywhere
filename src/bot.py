@@ -1323,6 +1323,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
         mark_tg_reply_target(topic_id, message.message_id)
     start_typing(context.bot, chat_id, session_key)
     await _inject_tmux(target_pane, text)
+    if not is_private and topic_id:  # 👀：已送进会话；这一轮结束时 liveness 改成 👌
+        from src import liveness
+        liveness.note_user_message(topic_id, message.message_id)
+        asyncio.create_task(liveness.react(context.bot, chat_id, message.message_id, "👀"))
     if claude_start_offsets is not None:
         from src.api_server import register_pane_watcher
         if not await register_pane_watcher(target_pane, cwd, start_offsets=claude_start_offsets):

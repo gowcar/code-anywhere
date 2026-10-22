@@ -147,6 +147,31 @@ _monitor: "Monitor | None" = None
 _names: dict[str, dict] | None = None
 
 
+_user_msgs: dict[int, list[int]] = {}   # 本轮已送进会话、还没回应“完成”的用户消息
+
+
+def note_user_message(topic_id: int, message_id: int) -> None:
+    _user_msgs.setdefault(topic_id, []).append(message_id)
+
+
+async def react(bot, chat_id: int, message_id: int, emoji: str) -> None:
+    """在用户消息上点表情：不发新消息、不响通知，告诉用户“收到了 / 做完了”。"""
+    from telegram import ReactionTypeEmoji
+    try:
+        await bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=[ReactionTypeEmoji(emoji)])
+    except Exception as exc:
+        log.debug("[liveness] 表情回应失败 msg=%s: %s", message_id, exc)
+
+
+def turn_finished(topic_id: int) -> None:
+    """一轮正常完成（Claude Stop 钩子 / Codex 回合结束）：把本轮的 👀 改成 👌。
+    比等状态采样从 running 变 idle 更准——10 秒内答完的快速回合采样可能根本看不到 running。"""
+    pending = _user_msgs.pop(topic_id, [])
+    if pending and _monitor:
+        for message_id in pending:
+            asyncio.create_task(react(_monitor.bot, _monitor.chat_id, message_id, "👌"))
+
+
 def note_activity(topic_id: int) -> None:
     _activity[topic_id] = _activity.get(topic_id, 0) + 1
 
@@ -347,6 +372,8 @@ class Monitor:
         if topic.state == "idle":
             topic.turn_started = None
             _last_tool.pop(topic.topic_id, None)
+            for message_id in _user_msgs.pop(topic.topic_id, []):  # 这一轮做完：👀 → 👌
+                await react(self.bot, self.chat_id, message_id, "👌")
             if topic.card_id:  # 正常结束：回答本身已说明完成，卡片删掉
                 await self._delete(topic.card_id)
                 topic.card_id = None
@@ -446,8 +473,8 @@ def buttons(topic_id: int):
     """状态卡与告警上的按钮：点一下就能看终端或中断，不用敲命令。"""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⏹ 中断", callback_data=f"lv:abort:{topic_id}"),
-        InlineKeyboardButton("📸 看终端", callback_data=f"lv:shot:{topic_id}"),
+        InlineKeyboardButton("⏹ 中断", callback_data=f"lv:abort:{topic_id}", style="danger"),
+        InlineKeyboardButton("📸 看终端", callback_data=f"lv:shot:{topic_id}", style="primary"),
     ]])
 
 
@@ -462,6 +489,7 @@ def note_abort(topic_id: int) -> int | None:
     topic = _topics.get(topic_id)
     if not topic:
         return None
+    _user_msgs.pop(topic_id, None)  # 被中断的保持 👀，不标“完成”
     card, topic.card_id, topic.turn_started = topic.card_id, None, None
     _save_cards()
     return card

@@ -45,6 +45,7 @@ class MonitorTests(unittest.TestCase):
                   patch.dict(liveness._activity, {}, clear=True),
                   patch.dict(liveness._last_tool, {}, clear=True),
                   patch.object(liveness, "_monitor", None),
+                  patch.dict(liveness._user_msgs, {}, clear=True),
                   patch("src.projects.get_path", return_value="/w/demo")):
             p.start(); self.addCleanup(p.stop)
         self.bot = FakeBot()
@@ -168,6 +169,26 @@ class MonitorTests(unittest.TestCase):
         with patch.object(liveness.Monitor, "tick", AsyncMock(side_effect=asyncio.CancelledError)):
             with self.assertRaises(asyncio.CancelledError):
                 await self.mon.run()
+
+
+class ReactionTests(unittest.TestCase):
+    def test_done_marks_all_pending_messages_and_abort_does_not(self):
+        bot = FakeBot(); bot.reactions = []
+        async def set_message_reaction(**kw):
+            bot.reactions.append((kw["message_id"], kw["reaction"][0].emoji))
+        bot.set_message_reaction = set_message_reaction
+        async def scenario():
+            with patch.dict(liveness._user_msgs, {}, clear=True), patch.object(liveness, "_monitor", None):
+                liveness.Monitor(bot, -100)
+                liveness.note_user_message(7, 11); liveness.note_user_message(7, 12)
+                liveness.turn_finished(7)
+                liveness.note_user_message(8, 21)
+                with patch.dict(liveness._topics, {8: liveness.Topic(8)}):
+                    liveness.note_abort(8)
+                liveness.turn_finished(8)
+                await asyncio.sleep(0.05)
+        asyncio.run(scenario())
+        self.assertEqual(sorted(bot.reactions), [(11, "👌"), (12, "👌")])
 
 
 class FloodTests(unittest.TestCase):

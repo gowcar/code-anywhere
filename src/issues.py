@@ -103,7 +103,7 @@ def short_ref(issue: dict) -> str:
 def confirm_keyboard(project_id: int, iid: int, ref: str):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"确认放弃 {ref}", callback_data=f"is:dropok:{project_id}:{iid}"),
+        InlineKeyboardButton(f"确认放弃 {ref}", callback_data=f"is:dropok:{project_id}:{iid}", style="danger"),
         InlineKeyboardButton("取消", callback_data=f"is:open:{project_id}:{iid}"),
     ]])
 
@@ -228,10 +228,10 @@ def detail(issues: list[dict], project_id: int, iid: int):
         lines += ["", f"验证：{escape(hint)}" if hint else "⚠️ 负责会话还没写验证方法，可在 issue-desk 追问"]
     lines += ["", f'<a href="{escape(issue["web_url"], quote=True)}">在 GitLab 打开</a> · 第 {index + 1}/{len(items)} 个']
     if state == "agent:to-verify":
-        actions = [InlineKeyboardButton("✅ 通过", callback_data=f"is:pass:{key}"),
-                   InlineKeyboardButton("↩️ 不通过", callback_data=f"is:fail:{key}")]
+        actions = [InlineKeyboardButton("✅ 通过", callback_data=f"is:pass:{key}", style="success"),
+                   InlineKeyboardButton("↩️ 不通过", callback_data=f"is:fail:{key}", style="primary")]
     else:
-        actions = [InlineKeyboardButton(f"🗑 放弃 {alias_ref(issue, names)}", callback_data=f"is:drop:{key}")]
+        actions = [InlineKeyboardButton(f"🗑 放弃 {alias_ref(issue, names)}", callback_data=f"is:drop:{key}", style="danger")]
     nav = []
     if index > 0:
         nav.append(InlineKeyboardButton("◀ 上一个", callback_data=f"is:open:{_key(items[index - 1])}"))
