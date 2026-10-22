@@ -82,6 +82,12 @@ cd ~/workspace/code-anywhere
 
 内置 `local-sessions` MCP（Claude 和 Codex 都已注册），让一个项目的 Agent 能给另一个项目的 Agent 派活、查进度。约定：消息只写一句话，复杂内容放进 md 文件、消息里给路径。详见 [docs/session-mcp.md](docs/session-mcp.md)。
 
+### 共享浏览器：Agent 用浏览器，需要登录时你在手机上接管
+
+所有会话共用一个浏览器池（默认 2 个槽位，有界面，跑在虚拟屏幕里），通过 `browser` MCP 提供官方 Playwright MCP 的全部能力。每个会话第一次用浏览器时自动分到一个独占槽位，空闲 10 分钟自动归还；所有项目共用一个登录身份。
+
+遇到登录、SSO、二次验证、验证码时，Agent 调用 `request_browser_help`，你在它的 Thread 里收到 **[🖥 打开浏览器] [✅ 我弄好了]**：点开就在手机上通过 noVNC 直接操作同一个浏览器，密码只由你自己输入，模型看不到。远程查看用时临时启动（本机 x11vnc → ssh 反向隧道 → 手机能访问的中转机上临时起 noVNC），点“我弄好了”或 15 分钟超时后全部停掉。配置见 `.env.example` 的 `BROWSER_HELP_*`；`./setup` 会安装 Playwright MCP、Chromium、Xvfb/x11vnc，注册 MCP 并安装技能 `shared-browser`。目前只支持 Linux。
+
 ### 用 GitLab issue 管理反馈
 
 `./setup` 可选配置 GitLab。之后会多一个 **issue-desk** 话题：
