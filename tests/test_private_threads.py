@@ -77,6 +77,11 @@ class RoutingTests(unittest.TestCase):
         inject.assert_awaited_once()
         react.assert_not_called()
 
+    def test_no_typing_indicator_in_private_thread_mode(self):
+        with patch.object(bot.config, "CHAT_ID", 42), patch.object(bot.asyncio, "create_task") as create:
+            bot.start_typing(None, 42, 4707)
+        create.assert_not_called()
+
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \
              patch.object(bot.state, "get_cwd", return_value="/w/legacy"):

@@ -1006,7 +1006,10 @@ pending_typing: dict[int, asyncio.Task] = {}
 
 
 def start_typing(bot, chat_id: int, topic_id: int):
-    """为终端注入路径启动 typing。若已有任务，先取消再启新的（重置计时）。"""
+    """为终端注入路径启动 typing。若已有任务，先取消再启新的（重置计时）。
+    私聊 Thread 模式不发：客户端会把“正在输入”显示成列表预览里闪动的蓝色长条，且列表已有状态灯。"""
+    if _private_thread_mode():
+        return
     old = pending_typing.pop(topic_id, None)
     if old and not old.done():
         old.cancel()

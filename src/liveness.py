@@ -29,6 +29,8 @@ TOOL_LINES = 4       # 卡片里滚动显示的最近动作条数
 BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞上限流会整体暂停，正式回复遇限流会等待重发
 SPINNER = "◐◓◑◒"
 HEARTBEAT = 60       # 私聊模式：运行中这么久没有任何动作，就冒一条会自动消散的“仍在运行”心跳
+DIGEST_EVERY = 30    # 私聊模式：工具动作合并，最多每这么久发一条会消散的汇总（逐条发会让 Thread 列表预览不停闪）
+TITLE_MAX = 18       # 带状态灯时名字的最大长度；列表右侧还要放时间和未读数，客户端从末尾截断，太长灯就看不到
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
 TITLE_GAP = 60       # 同一话题两次改名的最小间隔
@@ -106,9 +108,6 @@ def base_title(name: str) -> str:
     return _KNOWN_PREFIX.sub("", name).strip()
 
 
-TITLE_MAX = 22  # 带状态灯时名字的最大长度；客户端从末尾截断，太长灯就看不到了
-
-
 def titled(base: str, state: str) -> str:
     """状态灯放在名字末尾：放开头会被 Telegram 拿去当 Thread 图标，出现一大一小两个灯、还挡住字母图标。"""
     emoji = EMOJI.get(state, "")
@@ -143,6 +142,8 @@ class Topic:
     card_updated: float = 0.0
     card_posted: float = 0.0
     frame: int = 0                       # 转圈动画帧：每次刷新换一帧，停了就说明没在刷新
+    digest_at: float = 0.0               # 私聊模式：上一条工具汇总的发送时间
+    digest_pending: int = 0              # 私聊模式：上次汇总之后新增的工具动作数
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 定时检查与工具事件可能同时到：防止各发一张卡
     alert_id: int | None = None
     title_applied_at: float = 0.0
@@ -195,7 +196,9 @@ async def on_tool(topic_id: int, description: str) -> bool:
     if _monitor is None:
         return False
     await _monitor.tool_event(topic_id)
-    return not _monitor.private_mode  # 私聊模式：照旧单独发、几秒后消散
+    if _monitor.private_mode:
+        await _monitor.tool_digest(_topics[topic_id])
+    return True
 
 
 def _load_names() -> dict:
@@ -409,6 +412,30 @@ class Monitor:
             return
         async with topic.lock:
             await self._update_card(topic, now, force)
+
+    async def tool_digest(self, topic: Topic):
+        """私聊模式：工具动作合并成最多每 DIGEST_EVERY 秒一条、几秒后消散的汇总。"""
+        topic.digest_pending += 1
+        wait = topic.digest_at + DIGEST_EVERY - time.time()
+        if wait <= 0:
+            await self._send_digest(topic)
+        elif topic.topic_id not in self._flush or self._flush[topic.topic_id].done():
+            async def later():
+                await asyncio.sleep(wait)
+                await self._send_digest(topic)
+            self._flush[topic.topic_id] = asyncio.create_task(later())
+
+    async def _send_digest(self, topic: Topic):
+        tools = _last_tool.get(topic.topic_id)
+        if not topic.digest_pending or not tools or topic.state == "idle" and topic.turn_started is None:
+            return
+        extra = topic.digest_pending - 1
+        text = tools[-1][0] + (f"\n（另有 {extra} 个动作）" if extra > 0 else "")
+        topic.digest_pending, topic.digest_at, topic.card_updated = 0, time.time(), time.time()
+        if time.time() < self.paused_until:
+            return
+        from src.renderer import send_ephemeral
+        await send_ephemeral(self.bot, self.chat_id, text, ttl=6.0, message_thread_id=topic.topic_id, parse_mode=None)
 
     async def _heartbeat(self, topic: Topic, now: float):
         """私聊模式：运行中长时间没有工具动作（如长时间思考），冒一条会消散的心跳，免得看起来像卡死。"""

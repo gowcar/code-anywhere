@@ -176,28 +176,35 @@ class MonitorTests(unittest.TestCase):
 
 
 class PrivateModeTests(unittest.TestCase):
-    """私聊 Thread 模式：工具调用照旧单独发、几秒后消散；长时间无动作冒心跳；不发状态卡。"""
-    def test_tools_go_ephemeral_and_heartbeat_only_when_quiet(self):
+    """私聊 Thread 模式：工具动作合并成最多每 30 秒一条消散汇总；长时间无动作冒心跳；不发状态卡。"""
+    def test_tools_are_digested_and_heartbeat_only_when_quiet(self):
         bot = FakeBot()
         sent = []
         async def fake_ephemeral(_bot, chat_id, text, ttl=5.0, message_thread_id=None, parse_mode="HTML"):
-            sent.append((message_thread_id, text))
+            sent.append(text)
+        clock = [1000.0]
+        async def no_sleep(_):
+            clock[0] += 30
         async def scenario():
             with patch.dict(liveness._topics, {}, clear=True), patch.dict(liveness._last_tool, {}, clear=True), \
-                 patch.object(liveness, "_monitor", None), patch("src.renderer.send_ephemeral", fake_ephemeral):
+                 patch.object(liveness, "_monitor", None), patch("src.renderer.send_ephemeral", fake_ephemeral), \
+                 patch.object(liveness.time, "time", lambda: clock[0]), patch.object(liveness.asyncio, "sleep", no_sleep):
                 mon = liveness.Monitor(bot, 42)                    # 正数 = 私聊
-                handled = await liveness.on_tool(7, "⚡ <code>ls</code>")
+                handled = await liveness.on_tool(7, "⚡ <code>ls</code>")       # 第一个动作：立刻发
+                for cmd in ("git status", "git diff", "pytest"):
+                    await liveness.on_tool(7, f"⚡ <code>{cmd}</code>")         # 30 秒内：合并
+                await asyncio.gather(*mon._flush.values())
+                first_batch = list(sent)
                 topic = liveness._topics[7]
-                start = topic.turn_started
-                await mon.observe(7, snap(tokens="↓ 1k"), 0, start + 30)   # 30 秒：不打扰
-                quiet = list(sent)
-                await mon.observe(7, snap(tokens="↓ 2k"), 0, start + 70)   # 70 秒无动作：心跳
-                return handled, quiet
-        handled, quiet = asyncio.run(scenario())
-        self.assertFalse(handled)                                   # 调用方照旧发消散消息
-        self.assertEqual(quiet, [])
-        self.assertEqual(len(sent), 1)
-        self.assertIn("仍在运行", sent[0][1])
+                await mon.observe(7, snap(tokens="↓ 1k"), 0, clock[0] + 20)    # 刚发过汇总：不冒心跳
+                quiet = len(sent)
+                await mon.observe(7, snap(tokens="↓ 2k"), 0, clock[0] + 70)    # 70 秒无动作：心跳
+                return handled, first_batch, quiet
+        handled, first_batch, quiet = asyncio.run(scenario())
+        self.assertTrue(handled)                                    # 调用方不再逐条发
+        self.assertEqual(first_batch, ["⚡ ls", "⚡ pytest\n（另有 2 个动作）"])
+        self.assertEqual(quiet, 2)
+        self.assertIn("仍在运行", sent[-1])
         self.assertEqual(bot.sent, [])                              # 没有状态卡
 
     def test_live_elapsed_ticks_with_own_clock(self):
@@ -265,6 +272,7 @@ class TextTests(unittest.TestCase):
         self.assertEqual(liveness.titled("demo", "stalled"), "demo 🔴")
         long_title = liveness.titled("digital-buddy-seatalk-live-current", "running")
         self.assertTrue(long_title.endswith(" 🟢") and len(long_title) <= liveness.TITLE_MAX + 2)
+        self.assertEqual(liveness.titled("digital-buddy-seatalk", "running"), "digital-b…-seatalk 🟢")
 
     def test_tool_note_is_plain_text(self):
         with patch.dict(liveness._last_tool, {}, clear=True):
