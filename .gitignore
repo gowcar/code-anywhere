@@ -68,3 +68,6 @@ logs/*.json
 # Live status card ids (cleanup after restart)
 .liveness-cards.json
 .liveness-cards.tmp
+
+# Migration backups
+.migration-backup-*/

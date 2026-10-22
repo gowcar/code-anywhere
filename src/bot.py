@@ -203,7 +203,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     path = (WORKSPACE_ROOT / args[0]).resolve()
-    link = lambda tid: f"https://t.me/c/{str(chat_id).removeprefix('-100')}/{tid}"
+    def link(tid):  # 群话题可给 t.me/c 链接；私聊话题没有公开链接，直接报名字
+        return f"https://t.me/c/{str(chat_id).removeprefix('-100')}/{tid}" if chat_id < 0 else f"「{args[0]}」话题"
     if existing := projects.get_topic(str(path)):
         await update.message.reply_text(f"项目已存在：{link(existing)}")
         return
@@ -1137,8 +1138,10 @@ def _update_cwd(update: Update) -> str | None:
     msg = update.effective_message
     if not msg:
         return None
-    return (state.get_cwd(msg.chat_id) if msg.chat.type == "private"
-            else projects.get_path(msg.message_thread_id))
+    # 私聊话题模式（Bot API 9.3+）与群组话题一样按话题路由；私聊里不在话题内的消息才走单会话逻辑
+    if msg.chat.type == "private" and not msg.message_thread_id:
+        return state.get_cwd(msg.chat_id)
+    return projects.get_path(msg.message_thread_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1191,7 +1194,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
 
     topic_id = message.message_thread_id
     chat_id = message.chat_id
-    is_private = message.chat.type == "private"
+    # “私聊”指私聊里不在任何话题内的消息；私聊话题按话题路由，和群组话题一样
+    is_private = message.chat.type == "private" and not topic_id
     has_file = bool(message.photo or message.document or message.video
                     or getattr(message, "video_note", None)
                     or message.audio or message.voice or message.sticker)
