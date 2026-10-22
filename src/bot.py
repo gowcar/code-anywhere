@@ -408,10 +408,11 @@ async def cmd_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _issues_summary():
+    """第一层：精简列表（每个 issue 一个按钮）。"""
     from src import issues
     try:
         found = await asyncio.to_thread(issues.fetch_open_issues)
-        return issues.format_summary(found), issues.keyboard(found)
+        return issues.overview(found)
     except FileNotFoundError:
         return "还没有配置 GitLab 令牌（~/.config/gitlab-token），运行 ./setup --only gitlab", None
     except Exception as exc:
@@ -424,13 +425,18 @@ _issue_reason_prompts: dict[int, tuple[int, int]] = {}
 
 
 async def _issues_callback(query, context, data: str):
+    """列表 ↔ 详情两层；操作按钮只作用于当前打开的那一条。"""
     from telegram import ForceReply
     from src import issues
     _, action, project_id, iid = data.split(":")
     project_id, iid = int(project_id), int(iid)
-    if action == "refresh":
-        await query.answer("已刷新")
-    elif action == "drop":  # 放弃要二次确认，防手滑
+    show = None  # 操作后要展示的详情 (project_id, iid)；None 表示回列表
+    if action in ("list", "refresh"):
+        await query.answer()
+    elif action == "open":
+        await query.answer()
+        show = (project_id, iid)
+    elif action == "drop":  # 放弃：在当前这一条上二次确认，防手滑
         issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
         await query.answer()
         await query.edit_message_reply_markup(issues.confirm_keyboard(project_id, iid, issues.short_ref(issue)))
@@ -442,6 +448,7 @@ async def _issues_callback(query, context, data: str):
             if action == "pass":
                 await asyncio.to_thread(issues.verify_pass, project_id, iid)
                 await query.answer(f"{ref} 已验证通过并关闭")
+                show = "next"  # 连续验证：跳到下一个待验证
             elif action == "fail":
                 await asyncio.to_thread(issues.verify_fail, project_id, iid)
                 await query.answer(f"{ref} 已退回待处理")
@@ -452,22 +459,26 @@ async def _issues_callback(query, context, data: str):
             elif action == "dropok":
                 was_doing = "agent:doing" in issue.get("labels", [])
                 await asyncio.to_thread(issues.abandon, project_id, iid)
-                note = ""
-                if was_doing:
-                    note = "；" + await issues.notify_owner(
-                        issue, f"GitLab issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
                 await query.answer(f"{ref} 已放弃并关闭")
-                if note:
-                    await query.message.reply_text(f"🗑 {ref} 已放弃并关闭{note}")
+                if was_doing:
+                    result = await issues.notify_owner(
+                        issue, f"GitLab issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
+                    await query.message.reply_text(f"🗑 {ref} 已放弃并关闭；{result}")
         except Exception as exc:
             log.warning("[issues] 操作失败 %s %s: %s", action, ref, exc)
             await query.answer(f"操作失败：{exc}"[:190], show_alert=True)
-    text, markup = await _issues_summary()  # 原地刷新汇总
+            show = (project_id, iid)
     try:
+        found = await asyncio.to_thread(issues.fetch_open_issues)
+        if show == "next":
+            nxt = issues.next_to_verify(found)
+            show = (nxt["project_id"], nxt["iid"]) if nxt else None
+        view = issues.detail(found, *show) if show else None
+        text, markup = view or issues.overview(found)
         await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
     except Exception as exc:
         if "not modified" not in str(exc):
-            log.warning("[issues] 刷新汇总失败: %s", exc)
+            log.warning("[issues] 刷新视图失败: %s", exc)
 
 
 async def _handle_issue_reason(message) -> bool:
