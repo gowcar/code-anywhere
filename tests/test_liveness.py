@@ -257,6 +257,20 @@ class FloodTests(unittest.TestCase):
         self.assertTrue(mon._paused())
 
 
+class CodexUsageTests(unittest.TestCase):
+    def test_context_and_turn_tokens_from_transcript(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            event = lambda used, out: _json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"output_tokens": out}, "last_token_usage": {"input_tokens": used},
+                "model_context_window": 200000}}}) + "\n"
+            path.write_text(event(50000, 1000) + event(150000, 4200))
+            self.assertEqual(liveness.codex_usage(str(path)), (75, 4200))
+        self.assertEqual(liveness.codex_usage(None), (None, 0))
+        self.assertEqual(liveness.human_tokens(3200), "3.2k")
+
+
 class TextTests(unittest.TestCase):
     def test_base_title_strips_status_prefix(self):
         self.assertEqual(liveness.base_title("🟢 digital-buddy-ios"), "digital-buddy-ios")

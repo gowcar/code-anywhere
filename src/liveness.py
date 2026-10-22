@@ -51,6 +51,7 @@ class Snapshot:
     context: str = ""            # 如 "58%" 已用 / "97% 剩余"
     detail: str = ""             # retrying 等状态的原因
     fingerprint: str = ""        # 去掉计时/状态栏后的屏幕摘要，用于判断进展
+    total_out: int = 0           # Codex：会话累计输出 token（屏幕上没有，取自会话日志），用来算本轮用量
 
 
 _CLAUDE_SPINNER = re.compile(r"^\s*\S\s+(\S+…)\s*\(([^)]*)\)", re.MULTILINE)
@@ -104,6 +105,32 @@ def parse_screen(screen: str, backend: str) -> Snapshot:
     return snap
 
 
+def codex_usage(path: str | None) -> tuple[int | None, int]:
+    """Codex 屏幕上不显示 token 与上下文用量，从会话日志最后一条 token_count 取：(上下文已用 %, 累计输出 token)。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - (512 << 10)))
+            tail = f.read().decode("utf-8", "replace")
+    except (OSError, TypeError):
+        return None, 0
+    for line in reversed(tail.splitlines()):
+        if '"token_count"' not in line:
+            continue
+        try:
+            info = json.loads(line)["payload"]["info"]
+            window = info.get("model_context_window") or 0
+            used = info["last_token_usage"]["input_tokens"]
+            return (round(used * 100 / window) if window else None), info["total_token_usage"]["output_tokens"]
+        except (ValueError, KeyError, TypeError):
+            continue
+    return None, 0
+
+
+def human_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
 def base_title(name: str) -> str:
     return _KNOWN_PREFIX.sub("", name).strip()
 
@@ -142,6 +169,7 @@ class Topic:
     card_updated: float = 0.0
     card_posted: float = 0.0
     frame: int = 0                       # 转圈动画帧：每次刷新换一帧，停了就说明没在刷新
+    out_base: int = 0                    # Codex：本轮开始时的累计输出 token
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 定时检查与工具事件可能同时到：防止各发一张卡
     alert_id: int | None = None
     title_applied_at: float = 0.0
@@ -356,8 +384,12 @@ class Monitor:
             except Exception:
                 screen = ""
             snap = parse_screen(screen, backend) if screen else Snapshot()
-            if backend == "codex" and (info.get("turn_status") or {}).get("activity") == "retrying":
-                snap.state = "retrying"
+            if backend == "codex":
+                if (info.get("turn_status") or {}).get("activity") == "retrying":
+                    snap.state = "retrying"
+                pct, snap.total_out = codex_usage(info.get("transcript_path"))
+                if pct is not None and not snap.context:
+                    snap.context = f"已用 {pct}%"
             if any(p.get("session_id") == sid for p in _pending_permission_events()):
                 snap.state = "waiting"
             size = _size(info.get("transcript_path"))
@@ -374,6 +406,11 @@ class Monitor:
         active = snap.state in ("running", "retrying")
         if active and topic.turn_started is None:
             topic.turn_started, topic.last_progress = now, now
+            topic.out_base = snap.total_out
+        if snap.total_out and not snap.tokens:  # Codex：本轮输出 token = 累计 - 本轮开始时
+            if not topic.out_base:
+                topic.out_base = snap.total_out
+            snap.tokens = f"↓ {human_tokens(snap.total_out - topic.out_base)}"
         state = snap.state
         if active and now - topic.last_progress >= STALL:
             state = "stalled"
