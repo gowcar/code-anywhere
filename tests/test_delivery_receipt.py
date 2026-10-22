@@ -45,6 +45,15 @@ class ReceiptTests(unittest.TestCase):
         self.run_confirm("帮我看看日志", screen="› 帮我看看日志")
         self.assertIn("停在终端输入框里", self.message.reply_text.await_args.args[0])
 
+    def test_claude_queued_command_counts_as_received(self):
+        with self.path.open("a") as f:   # Claude 一轮进行中收到的消息记为 queued_command 附件
+            f.write(json.dumps({"type": "attachment", "attachment": {"type": "queued_command", "prompt": "图标太多了很花"}}) + "\n")
+        self.run_confirm("图标太多了很花", screen="❯ 图标太多了很花")
+        self.message.reply_text.assert_not_awaited()
+
+    def test_quote_is_skipped_for_snippet(self):
+        self.assertEqual(bot.receipt_snippet("[引用消息]\n别人说的\n[/引用消息]\n\n我的问题"), "我的问题")
+
     def test_snippet(self):
         self.assertEqual(bot.receipt_snippet("@.attachments/x.jpg\n看看这个"), "看看这个")
         self.assertEqual(bot.receipt_snippet("@.attachments/x/y.jpg"), "y.jpg")

@@ -72,7 +72,8 @@ class RoutingTests(unittest.TestCase):
              patch.object(bot, "_find_pane_for_project", AsyncMock(return_value="%1")), \
              patch("src.api_server.register_pane_watcher", AsyncMock(return_value=True)), \
              patch.object(bot, "start_typing"), patch.object(bot, "_inject_tmux", AsyncMock()) as inject, \
-             patch("src.liveness.react", AsyncMock()) as react:
+             patch("src.liveness.react", AsyncMock()) as react, \
+             patch.object(bot, "_transcript_position", AsyncMock(return_value=None)):
             asyncio.run(bot._handle_message(upd, SimpleNamespace(bot=None)))
         inject.assert_awaited_once()
         react.assert_not_called()
@@ -81,6 +82,27 @@ class RoutingTests(unittest.TestCase):
         with patch.object(bot.config, "CHAT_ID", 42), patch.object(bot.asyncio, "create_task") as create:
             bot.start_typing(None, 42, 4707)
         create.assert_not_called()
+
+    def test_reply_quote_only_when_session_idle(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        for screen, quoted in (("› Ask Codex to do anything", True), ("◦ Working (16s • esc to interrupt)", False)):
+            msg = SimpleNamespace(message_thread_id=4704, chat_id=42, chat=SimpleNamespace(type="private"), text="新问题",
+                                  caption=None, photo=None, document=None, video=None, video_note=None, audio=None,
+                                  voice=None, sticker=None, reply_to_message=None, reply_text=AsyncMock(), message_id=9)
+            upd = SimpleNamespace(effective_user=SimpleNamespace(id=1), message=msg, effective_message=msg)
+            with patch.object(bot.config, "CHAT_ID", 42), patch.object(bot, "auth_check", return_value=True), \
+                 patch.object(bot.projects, "get_path", return_value="/w/buddy"), \
+                 patch.object(bot.backends, "get_backend", return_value="codex"), \
+                 patch.object(bot.backends, "codex_transcript", AsyncMock(return_value=("sid", "/p"))), \
+                 patch.object(bot, "_find_pane_for_project", AsyncMock(return_value="%1")), \
+                 patch("src.api_server.register_pane_watcher", AsyncMock(return_value=True)), \
+                 patch.object(bot, "_capture_pane", AsyncMock(return_value=screen)), \
+                 patch.object(bot, "_transcript_position", AsyncMock(return_value=None)), \
+                 patch.object(bot, "_inject_tmux", AsyncMock()), \
+                 patch("src.api_server.mark_tg_reply_target") as mark:
+                asyncio.run(bot._handle_message(upd, SimpleNamespace(bot=None)))
+            self.assertEqual(mark.called, quoted, screen)
 
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \

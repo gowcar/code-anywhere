@@ -176,36 +176,29 @@ class MonitorTests(unittest.TestCase):
 
 
 class PrivateModeTests(unittest.TestCase):
-    """私聊 Thread 模式：工具动作合并成最多每 30 秒一条消散汇总；长时间无动作冒心跳；不发状态卡。"""
-    def test_tools_are_digested_and_heartbeat_only_when_quiet(self):
+    """私聊 Thread 模式：唯一一张状态卡、新消息出现后 2 秒内挪回最底部、内容滚动、带按钮；不另发工具消息。"""
+    def test_single_card_pinned_to_bottom(self):
         bot = FakeBot()
-        sent = []
-        async def fake_ephemeral(_bot, chat_id, text, ttl=5.0, message_thread_id=None, parse_mode="HTML"):
-            sent.append(text)
-        clock = [1000.0]
-        async def no_sleep(_):
-            clock[0] += 30
         async def scenario():
             with patch.dict(liveness._topics, {}, clear=True), patch.dict(liveness._last_tool, {}, clear=True), \
-                 patch.object(liveness, "_monitor", None), patch("src.renderer.send_ephemeral", fake_ephemeral), \
-                 patch.object(liveness.time, "time", lambda: clock[0]), patch.object(liveness.asyncio, "sleep", no_sleep):
+                 patch.dict(liveness._activity, {}, clear=True), patch.object(liveness, "_monitor", None), \
+                 patch.object(liveness, "CARDS_FILE", Path(tempfile.mkdtemp()) / "cards.json"), \
+                 patch.object(liveness, "PRIVATE_MOVE_EVERY", 0.01):
                 mon = liveness.Monitor(bot, 42)                    # 正数 = 私聊
-                handled = await liveness.on_tool(7, "⚡ <code>ls</code>")       # 第一个动作：立刻发
-                for cmd in ("git status", "git diff", "pytest"):
-                    await liveness.on_tool(7, f"⚡ <code>{cmd}</code>")         # 30 秒内：合并
-                await asyncio.gather(*mon._flush.values())
-                first_batch = list(sent)
-                topic = liveness._topics[7]
-                await mon.observe(7, snap(tokens="↓ 1k"), 0, clock[0] + 20)    # 刚发过汇总：不冒心跳
-                quiet = len(sent)
-                await mon.observe(7, snap(tokens="↓ 2k"), 0, clock[0] + 70)    # 70 秒无动作：心跳
-                return handled, first_batch, quiet
-        handled, first_batch, quiet = asyncio.run(scenario())
-        self.assertTrue(handled)                                    # 调用方不再逐条发
-        self.assertEqual(first_batch, ["ls", "pytest（另有 2 个动作）"])
-        self.assertEqual(quiet, 2)
-        self.assertIn("仍在运行", sent[-1])
-        self.assertEqual(bot.sent, [])                              # 没有状态卡
+                handled = await liveness.on_tool(7, "⚡ <code>ls</code>")
+                await liveness.on_tool(7, "⚡ <code>git status</code>")
+                first_card = liveness._topics[7].card_id
+                liveness.note_activity(7)                          # 卡片下面出现了一条正式回复
+                await asyncio.sleep(0.1)
+                return handled, first_card, liveness._topics[7].card_id
+        handled, first_card, card_now = asyncio.run(scenario())
+        self.assertTrue(handled)                                    # 不另发工具消息
+        cards = [m for m in bot.sent if m.get("reply_markup")]
+        self.assertEqual(len(cards), 2)                             # 第一张 + 挪到底部后重发的一张
+        self.assertEqual(bot.deleted, [first_card])                 # 旧卡删掉，始终只有一张
+        self.assertNotEqual(card_now, first_card)
+        buttons = [b.callback_data for b in cards[-1]["reply_markup"].inline_keyboard[0]]
+        self.assertEqual(buttons, ["lv:abort:7", "lv:shot:7"])
 
     def test_live_elapsed_ticks_with_own_clock(self):
         topic = liveness.Topic(7, state="running", turn_started=1000.0)

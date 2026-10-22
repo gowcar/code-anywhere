@@ -28,8 +28,8 @@ MOVE_EVERY = 45      # 状态卡挪到底部（删旧发新）的最小间隔，
 TOOL_LINES = 4       # 卡片里滚动显示的最近动作条数
 BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞上限流会整体暂停，正式回复遇限流会等待重发
 SPINNER = "◐◓◑◒"
-HEARTBEAT = 60       # 私聊模式：运行中这么久没有任何动作，就冒一条会自动消散的“仍在运行”心跳
-DIGEST_EVERY = 30    # 私聊模式：工具动作合并，最多每这么久发一条会消散的汇总（逐条发会让 Thread 列表预览不停闪）
+PRIVATE_MOVE_EVERY = 2   # 私聊模式额度宽松：卡片下面一出现新消息，最多 2 秒就挪回最底部
+PRIVATE_CARD_EVERY = 8   # 私聊模式：没有工具动作时卡片的刷新间隔
 TITLE_MAX = 18       # 带状态灯时名字的最大长度；列表右侧还要放时间和未读数，客户端从末尾截断，太长灯就看不到
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
@@ -142,8 +142,6 @@ class Topic:
     card_updated: float = 0.0
     card_posted: float = 0.0
     frame: int = 0                       # 转圈动画帧：每次刷新换一帧，停了就说明没在刷新
-    digest_at: float = 0.0               # 私聊模式：上一条工具汇总的发送时间
-    digest_pending: int = 0              # 私聊模式：上次汇总之后新增的工具动作数
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 定时检查与工具事件可能同时到：防止各发一张卡
     alert_id: int | None = None
     title_applied_at: float = 0.0
@@ -183,6 +181,8 @@ def turn_finished(topic_id: int) -> None:
 
 def note_activity(topic_id: int) -> None:
     _activity[topic_id] = _activity.get(topic_id, 0) + 1
+    if _monitor and _monitor.private_mode:  # 私聊模式：卡片下面有了新消息，尽快挪回最底部
+        asyncio.get_event_loop().create_task(_monitor.bump(topic_id))
 
 
 def note_tool(topic_id: int, description: str) -> None:
@@ -196,8 +196,6 @@ async def on_tool(topic_id: int, description: str) -> bool:
     if _monitor is None:
         return False
     await _monitor.tool_event(topic_id)
-    if _monitor.private_mode:
-        await _monitor.tool_digest(_topics[topic_id])
     return True
 
 
@@ -272,16 +270,17 @@ class Monitor:
         self.paused_until = 0.0  # TG 限流时暂停所有状态卡/改名调用，把额度让给正式回复
         self._flush: dict[int, asyncio.Task] = {}
         self._calls: deque = deque()
-        # 私聊 Thread 模式（chat_id 为用户 ID）：额度宽松，沿用“出现几秒后消散”的过程消息——
-        # 工具调用逐条显示，长时间无动作时每 HEARTBEAT 秒冒一条心跳；不发状态卡。
-        # （草稿气泡试过：客户端的逐字打出动画观感不好，2026-10-22 用户要求改回）
+        # 私聊 Thread 模式（chat_id 为用户 ID）额度约为群组 3 倍：同样一张状态卡，但更快挪回最底部、更勤刷新。
+        # （试过草稿气泡与“消散汇总”，用户最终选定状态卡：唯一一张、在最底部、内容滚动、带按钮，2026-10-22）
         self.private_mode = int(chat_id) > 0
+        self.move_every = PRIVATE_MOVE_EVERY if self.private_mode else MOVE_EVERY
+        self.card_every = PRIVATE_CARD_EVERY if self.private_mode else CARD_EVERY
         _monitor = self
 
     def _min_gap(self) -> float:
         """同一张卡两次编辑的最小间隔：活跃卡越多越慢，整体控制在 TG 每分钟额度内。"""
         active = sum(1 for t in _topics.values() if t.card_id)
-        return max(5.0, 4.0 * active)
+        return max(2.0, 1.5 * active) if self.private_mode else max(5.0, 4.0 * active)
 
     async def tool_event(self, topic_id: int, now: float | None = None):
         now = now or time.time()
@@ -290,8 +289,6 @@ class Monitor:
             topic.turn_started, topic.last_progress = now, now
             topic.state, topic.state_since = "running", now
         topic.last_progress = now
-        if self.private_mode:
-            return
         wait = topic.card_updated + self._min_gap() - now if topic.card_id else 0
         if self._paused():
             wait = max(wait, 10.0)  # 额度用完：动作先攒着，稍后合并进一次编辑
@@ -407,52 +404,15 @@ class Monitor:
                 _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
-        if self.private_mode:
-            await self._heartbeat(topic, now)
-            return
         async with topic.lock:
             await self._update_card(topic, now, force)
 
-    async def tool_digest(self, topic: Topic):
-        """私聊模式：工具动作合并成最多每 DIGEST_EVERY 秒一条、几秒后消散的汇总。"""
-        topic.digest_pending += 1
-        wait = topic.digest_at + DIGEST_EVERY - time.time()
-        if wait <= 0:
-            await self._send_digest(topic)
-        elif topic.topic_id not in self._flush or self._flush[topic.topic_id].done():
-            async def later():
-                await asyncio.sleep(wait)
-                await self._send_digest(topic)
-            self._flush[topic.topic_id] = asyncio.create_task(later())
-
-    async def _send_digest(self, topic: Topic):
-        tools = _last_tool.get(topic.topic_id)
-        if not topic.digest_pending or not tools or topic.state == "idle" and topic.turn_started is None:
-            return
-        extra = topic.digest_pending - 1
-        latest = re.sub(r"^\W+\s*", "", tools[-1][0])  # 去掉开头的 ⚡ 等符号：列表里只留状态灯一种符号
-        text = latest + (f"（另有 {extra} 个动作）" if extra > 0 else "")
-        topic.digest_pending, topic.digest_at, topic.card_updated = 0, time.time(), time.time()
-        if time.time() < self.paused_until:
-            return
-        from src.renderer import send_ephemeral
-        await send_ephemeral(self.bot, self.chat_id, text, ttl=6.0, message_thread_id=topic.topic_id, parse_mode=None)
-
-    async def _heartbeat(self, topic: Topic, now: float):
-        """私聊模式：运行中长时间没有工具动作（如长时间思考），冒一条会消散的心跳，免得看起来像卡死。"""
-        if not topic.turn_started or topic.state == "idle" or time.time() < self.paused_until:
-            return
-        last = max(topic.card_updated, _last_tool.get(topic.topic_id, [(None, 0.0)])[-1][1], topic.turn_started)
-        if now - last < HEARTBEAT:
-            return
-        topic.frame += 1
-        topic.card_updated = now
-        snap = topic.snapshot
-        facts = " · ".join(x for x in (human_elapsed(now - topic.turn_started),
-                                        f"{snap.tokens.lstrip('↓↑ ')} tokens" if snap.tokens else "") if x)
-        from src.renderer import send_ephemeral
-        await send_ephemeral(self.bot, self.chat_id, f"仍在运行 · {facts}",
-                             ttl=6.0, message_thread_id=topic.topic_id, parse_mode=None)
+    async def bump(self, topic_id: int):
+        """卡片下面出现了新消息：稍等片刻（让同一批消息发完）就把卡片挪回最底部。"""
+        await asyncio.sleep(self.move_every)
+        topic = _topics.get(topic_id)
+        if topic and topic.card_id and topic.state != "idle":
+            await self.update_card(topic, time.time(), force=True)  # 卡片已存在，不受“满 15 秒才出卡”限制
 
     async def _update_card(self, topic: Topic, now: float, force: bool):
         if not topic.turn_started or (not force and now - topic.turn_started < CARD_AFTER):
@@ -461,8 +421,8 @@ class Monitor:
             return
         # 后面有了新消息、且距上次挪动够久：挪到底部，不受编辑间隔限制
         move = (topic.card_id is not None and _activity.get(topic.topic_id, 0) != topic.card_activity
-                and now - topic.card_posted >= MOVE_EVERY)
-        if not force and not move and topic.card_id and now - topic.card_updated < max(CARD_EVERY, self._min_gap()) \
+                and now - topic.card_posted >= self.move_every)
+        if not force and not move and topic.card_id and now - topic.card_updated < max(self.card_every, self._min_gap()) \
                 and topic.state == "running":
             return
         topic.frame += 1
