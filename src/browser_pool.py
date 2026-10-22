@@ -31,6 +31,7 @@ SCREEN = os.getenv("BROWSER_POOL_SCREEN", "1280x800")
 IDLE_STOP = int(os.getenv("BROWSER_POOL_IDLE_STOP", "1800"))   # 无人租用这么久就停掉槽位
 RELEASE_GRACE = 20                                              # 断开后稍等，给重连留余地
 HELP_TIMEOUT = int(os.getenv("BROWSER_HELP_TIMEOUT", "900"))
+MIN_AVAILABLE_GIB = float(os.getenv("BROWSER_POOL_MIN_AVAILABLE_GIB", "2"))
 # 远程查看经中转机（手机能访问的机器）转出去；不配置则人工接管不可用
 RELAY_HOST = os.getenv("BROWSER_HELP_SSH_HOST", "")             # ssh 主机名（~/.ssh/config 里的 Host）
 RELAY_LISTEN = os.getenv("BROWSER_HELP_LISTEN", "")             # 中转机对外监听，如 10.0.1.188:6801
@@ -100,12 +101,16 @@ async def _version(slot: int) -> dict | None:
 
 
 async def _resource_check() -> tuple[bool, str]:
-    from src.config import PROJECT_ROOT
-    script = PROJECT_ROOT / "scripts/browser-resource-check"
-    if not script.exists():
+    """浏览器池只看内存（2026-10-23 用户决定）：池子槽位数固定，不受全局浏览器进程数阈值限制；
+    其他会话自行启动浏览器仍按 scripts/browser-resource-check 的全部规则。"""
+    try:
+        meminfo = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+        available = int(meminfo["MemAvailable"].split()[0]) / 1024 / 1024
+    except (OSError, KeyError, ValueError):
         return True, ""
-    code, out = await _run(str(script))
-    return code == 0, out.strip()
+    if available < MIN_AVAILABLE_GIB:
+        return False, f"系统可用内存 {available:.1f} GiB，低于 {MIN_AVAILABLE_GIB} GiB"
+    return True, ""
 
 
 async def start_slot(slot: int) -> None:
@@ -113,7 +118,7 @@ async def start_slot(slot: int) -> None:
         return
     ok, detail = await _resource_check()
     if not ok:
-        raise RuntimeError(f"浏览器资源检查未通过，暂不启动新浏览器：{detail}")
+        raise RuntimeError(f"内存不足，暂不启动共享浏览器：{detail}")
     profile = BASE / f"slot-{slot}"
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     width, height = SCREEN.split("x")
