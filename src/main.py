@@ -55,7 +55,7 @@ def main():
     log.info("Bot 启动")
     # 不用 app.run_polling —— PTB 的 Updater 轮询协程会被非 TelegramError 异常静默打死
     # （假死根因，详见 src/polling.py 模块注释与 recon/PROGRESS.md 阶段 4.1）
-    asyncio.run(run_app(app, allowed_updates=["message", "callback_query"]))
+    asyncio.run(run_app(app, allowed_updates=["message", "callback_query", "stopped_message_generation"]))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,19 @@ class RoutingTests(unittest.TestCase):
         inject.assert_not_awaited()
         self.assertIn("All Messages", msg.reply_text.await_args.args[0])
 
+    def test_native_stop_aborts_that_thread(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from telegram import Update
+        upd = Update.de_json({"update_id": 1, "stopped_message_generation": {
+            "chat": {"id": 42, "type": "private"}, "message_thread_id": 4705, "draft_id": 4705}}, None)
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+        with patch.object(bot.projects, "get_path", return_value="/w/ios"), \
+             patch.object(bot, "_abort_project", AsyncMock(return_value="⏹ 已中断当前回合")) as abort:
+            asyncio.run(bot._on_stopped_generation(upd, context))
+        abort.assert_awaited_once_with(context.bot, "/w/ios", 42, 4705)
+        self.assertEqual(context.bot.send_message.await_args.kwargs["message_thread_id"], 4705)
+
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \
              patch.object(bot.state, "get_cwd", return_value="/w/legacy"):

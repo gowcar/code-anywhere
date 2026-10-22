@@ -17,6 +17,7 @@ from telegram.ext import (
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    TypeHandler,
     filters,
     ContextTypes,
 )
@@ -229,6 +230,50 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    text="🟢 终端已就绪" if pane else "⚠️ 终端启动失败，发第一条消息时会再试一次")
     if update.message.message_thread_id != tid:
         await update.message.reply_text(f"已创建：{link(tid)}")
+
+
+async def _send_screen(message, cwd: str):
+    """把项目终端画成图片发回（保留排版和颜色，手机上可放大看）；失败退回文本。"""
+    pane = await _find_pane_for_project(cwd)
+    if not pane:
+        await message.reply_text("终端已经关闭")
+        return
+    try:
+        from src import term_image
+        ansi = await backends.command("tmux", "capture-pane", "-e", "-p", "-t", pane)
+        png = await asyncio.to_thread(term_image.render, ansi)
+        await message.reply_photo(photo=png, caption=f"{Path(cwd).name} 终端（{datetime.now():%H:%M:%S}）")
+    except Exception as exc:
+        log.warning("[liveness] 终端截图失败，改发文本: %s", exc)
+        from src import liveness
+        await message.reply_text(liveness.screen_excerpt(await _capture_pane(pane)), parse_mode="HTML")
+
+
+async def cmd_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/screen：看当前项目终端的截图。"""
+    if not auth_check(update.effective_user.id):
+        return
+    cwd = _update_cwd(update)
+    if not cwd:
+        await update.message.reply_text("请在项目 Thread 里使用 /screen")
+        return
+    await _send_screen(update.message, cwd)
+
+
+async def _on_stopped_generation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户点了草稿气泡上的原生“停止”按钮（Bot API 10.3 stopped_message_generation）→ 等同 /abort。"""
+    payload = (update.api_kwargs or {}).get("stopped_message_generation")
+    if not payload:
+        return
+    from src import liveness
+    chat_id = (payload.get("chat") or {}).get("id") or config.CHAT_ID
+    topic_id = liveness.topic_for_stopped_draft(payload)
+    cwd = projects.get_path(topic_id) if topic_id else None
+    log.info("[abort] 原生停止 topic=%s cwd=%s", topic_id, cwd)
+    if not cwd:
+        return
+    text = await _abort_project(context.bot, cwd, int(chat_id), topic_id)
+    await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text)
 
 
 async def cmd_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -554,19 +599,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = await _abort_project(context.bot, cwd, chat_id, int(topic))
             await query.message.reply_text(text, parse_mode=None)
             return
-        pane = await _find_pane_for_project(cwd)
-        if not pane:
-            await query.message.reply_text("终端已经关闭")
-            return
-        try:  # 画成图片：保留终端原来的排版和颜色，手机上可放大看
-            from src import term_image
-            ansi = await backends.command("tmux", "capture-pane", "-e", "-p", "-t", pane)
-            png = await asyncio.to_thread(term_image.render, ansi)
-            await query.message.reply_photo(photo=png, caption=f"{Path(cwd).name} 终端（{datetime.now():%H:%M:%S}）")
-        except Exception as exc:
-            log.warning("[liveness] 终端截图失败，改发文本: %s", exc)
-            from src import liveness
-            await query.message.reply_text(liveness.screen_excerpt(await _capture_pane(pane)), parse_mode="HTML")
+        await _send_screen(query.message, cwd)
         return
 
     # 权限审批：先唤醒等待中的请求（最关键），再做 UI 反馈
@@ -1571,6 +1604,7 @@ def create_app() -> Application:
             BotCommand("model", "模型 / effort / 权限：/model list 查看全部"),
             BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
             BotCommand("abort", "中断当前回合，丢弃还没处理的排队消息"),
+            BotCommand("screen", "看当前项目终端的截图"),
             BotCommand("new", "新建项目：/new 名字 [claude|codex]"),
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
@@ -1610,6 +1644,8 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("issues", cmd_issues))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("abort", cmd_abort))
+    app.add_handler(CommandHandler("screen", cmd_screen))
+    app.add_handler(TypeHandler(Update, _on_stopped_generation), group=-1)  # 草稿气泡的原生停止按钮
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_EDITED, _drop_own_topic_edit))

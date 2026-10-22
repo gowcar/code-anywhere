@@ -172,6 +172,43 @@ class MonitorTests(unittest.TestCase):
                 await self.mon.run()
 
 
+class DraftModeTests(unittest.TestCase):
+    """私聊 Thread 模式：状态用草稿气泡，不发状态卡消息；带原生停止按钮。"""
+    def test_tool_events_refresh_draft_not_card(self):
+        bot = FakeBot(); bot.drafts = []
+        async def send_message_draft(**kw):
+            bot.drafts.append(kw)
+        bot.send_message_draft = send_message_draft
+        async def scenario():
+            with patch.dict(liveness._topics, {}, clear=True), patch.dict(liveness._last_tool, {}, clear=True), \
+                 patch.object(liveness, "_monitor", None):
+                mon = liveness.Monitor(bot, 42)                    # 正数 = 私聊
+                self.assertTrue(mon.draft_mode)
+                await liveness.on_tool(7, "⚡ <code>ls</code>")
+                topic = liveness._topics[7]
+                topic.card_updated -= 2                            # 越过 1 秒节流
+                await liveness.on_tool(7, "⚡ <code>git status</code>")
+                return topic
+        topic = asyncio.run(scenario())
+        self.assertEqual(bot.sent, [])                             # 没有状态卡消息
+        self.assertEqual(len(bot.drafts), 2)
+        self.assertEqual(bot.drafts[-1]["draft_id"], 7)
+        self.assertEqual(bot.drafts[-1]["message_thread_id"], 7)
+        self.assertTrue(bot.drafts[-1]["api_kwargs"]["can_stop"])
+        self.assertIn("<code>git status</code>", bot.drafts[-1]["text"])
+
+    def test_live_elapsed_ticks_with_own_clock(self):
+        topic = liveness.Topic(7, state="running", turn_started=1000.0)
+        topic.snapshot = liveness.Snapshot(state="running", elapsed="5s")
+        self.assertIn("1分05秒", liveness.card_text(topic, 1065.0, live=True))
+        self.assertIn("5s", liveness.card_text(topic, 1065.0))
+
+    def test_stopped_draft_maps_to_topic(self):
+        self.assertEqual(liveness.topic_for_stopped_draft({"message_thread_id": 4705, "draft_id": 4705}), 4705)
+        with patch.dict(liveness._topics, {4704: liveness.Topic(4704)}, clear=True):
+            self.assertEqual(liveness.topic_for_stopped_draft({"draft_id": 4704}), 4704)
+
+
 class ReactionTests(unittest.TestCase):
     def test_done_marks_all_pending_messages_and_abort_does_not(self):
         bot = FakeBot(); bot.reactions = []

@@ -28,6 +28,7 @@ MOVE_EVERY = 45      # 状态卡挪到底部（删旧发新）的最小间隔，
 TOOL_LINES = 4       # 卡片里滚动显示的最近动作条数
 BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞上限流会整体暂停，正式回复遇限流会等待重发
 SPINNER = "◐◓◑◒"
+DRAFT_EVERY = 2.5    # 私聊模式：草稿气泡刷新间隔（草稿 30 秒不刷新就消失；同一 draft_id 的更新带过渡动画）
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
 TITLE_GAP = 60       # 同一话题两次改名的最小间隔
@@ -223,9 +224,14 @@ def _save_cards() -> None:
         log.warning("[liveness] 保存卡片编号失败", exc_info=True)
 
 
-def card_text(topic: Topic, now: float) -> str:
+def draft_id(topic_id: int) -> int:
+    return topic_id  # 每个 Thread 固定一个草稿编号：同编号的更新有过渡动画
+
+
+def card_text(topic: Topic, now: float, live: bool = False) -> str:
     snap = topic.snapshot
-    took = snap.elapsed or human_elapsed(now - (topic.turn_started or now))
+    # 草稿每 2～3 秒刷新，用自己的时钟让秒数持续走动；卡片刷新慢，用 CLI 自报的用时
+    took = human_elapsed(now - (topic.turn_started or now)) if live else (snap.elapsed or human_elapsed(now - (topic.turn_started or now)))
     spinner = SPINNER[topic.frame % len(SPINNER)]
     head = {"running": f"{spinner} 运行中", "retrying": "🔁 接口重试中", "stalled": "⚠️ 疑似卡住",
             "waiting": "🟡 等你审批或回答"}.get(topic.state, f"{spinner} 运行中")
@@ -254,6 +260,9 @@ class Monitor:
         self.paused_until = 0.0  # TG 限流时暂停所有状态卡/改名调用，把额度让给正式回复
         self._flush: dict[int, asyncio.Task] = {}
         self._calls: deque = deque()
+        # 私聊 Thread 模式（chat_id 为用户 ID）：状态用 sendMessageDraft 草稿气泡——天然在最底部、
+        # 不占编辑额度、自带原生停止按钮；群组模式仍用可编辑的状态卡消息
+        self.draft_mode = int(chat_id) > 0
         _monitor = self
 
     def _min_gap(self) -> float:
@@ -309,6 +318,8 @@ class Monitor:
         for tid, entry in _load_names().items():
             if entry.get("applied") != entry.get("base"):
                 _topics.setdefault(int(tid), Topic(int(tid), state="unknown"))
+        if self.draft_mode:
+            asyncio.create_task(self._draft_loop())
         while True:
             try:
                 await self.tick()
@@ -383,8 +394,35 @@ class Monitor:
                 _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
+        if self.draft_mode:
+            if force:  # 工具动作：立刻刷新草稿（节流由 _draft 处理）
+                await self._draft(topic, now)
+            return
         async with topic.lock:
             await self._update_card(topic, now, force)
+
+    async def _draft_loop(self):
+        """私聊模式：每 DRAFT_EVERY 秒刷新所有运行中话题的草稿；活跃话题多时自动放慢。"""
+        while True:
+            active = [t for t in _topics.values() if t.turn_started and t.state != "idle"]
+            for topic in active:
+                await self._draft(topic, time.time())
+            await asyncio.sleep(max(DRAFT_EVERY, 1.2 * len(active)))
+
+    async def _draft(self, topic: Topic, now: float):
+        if not topic.turn_started or topic.state == "idle" or time.time() < self.paused_until:
+            return
+        if now - topic.card_updated < 1.0:  # 两次草稿至少间隔 1 秒
+            return
+        topic.frame += 1
+        topic.card_updated = now
+        try:
+            await self.bot.send_message_draft(chat_id=self.chat_id, draft_id=draft_id(topic.topic_id),
+                                              message_thread_id=topic.topic_id, text=card_text(topic, now, live=True),
+                                              parse_mode="HTML", api_kwargs={"can_stop": True})
+        except Exception as exc:
+            log.warning("[liveness] 草稿刷新失败 topic=%s: %s", topic.topic_id, exc)
+            self._note_error(exc)
 
     async def _update_card(self, topic: Topic, now: float, force: bool):
         if not topic.turn_started or (not force and now - topic.turn_started < CARD_AFTER):
@@ -485,6 +523,15 @@ def note_flood(seconds: float) -> None:
     """其他地方（正式回复）撞上限流时调用：状态卡整体暂停，把额度让出来。"""
     if _monitor:
         _monitor.paused_until = max(_monitor.paused_until, time.time() + seconds + 5)
+
+
+def topic_for_stopped_draft(payload: dict) -> int | None:
+    """stopped_message_generation 更新 → 话题 ID（优先用 message_thread_id，否则由 draft_id 反查）。"""
+    thread = payload.get("message_thread_id")
+    if thread:
+        return int(thread)
+    wanted = payload.get("draft_id")
+    return next((tid for tid in _topics if draft_id(tid) == wanted), None)
 
 
 def note_abort(topic_id: int) -> int | None:
