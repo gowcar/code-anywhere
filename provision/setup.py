@@ -29,6 +29,9 @@ HOME = Path.home()
 BIN = HOME / ".local" / "bin"
 ENV_FILE = REPO / ".env"
 MCP_CMD = str(REPO / "scripts" / "session-mcp")
+BROWSER_MCP_CMD = str(REPO / "scripts" / "browser-mcp")
+PLAYWRIGHT_MCP = HOME / ".local" / "share" / "code-anywhere" / "playwright-mcp"
+PLAYWRIGHT_MCP_VERSION = "0.0.83"
 BEGIN, END = "<!-- code-anywhere:begin -->", "<!-- code-anywhere:end -->"
 IS_MAC = sys.platform == "darwin"
 CHECK_ONLY = False
@@ -460,22 +463,69 @@ def step_hooks():
 
 
 def step_mcp():
-    """local-sessions MCP（Claude 与 Codex 两边）"""
-    if which("claude"):
-        if run([which("claude"), "mcp", "get", "local-sessions"]).returncode == 0:
-            ok("Claude 已注册 local-sessions")
+    """local-sessions 与共享浏览器 browser 两个 MCP（Claude 与 Codex 两边）"""
+    for name, cmd in (("local-sessions", MCP_CMD), ("browser", BROWSER_MCP_CMD)):
+        if which("claude"):
+            if run([which("claude"), "mcp", "get", name]).returncode == 0:
+                ok(f"Claude 已注册 {name}")
+            else:
+                warn(f"Claude 未注册 {name}")
+                if ask(f"注册 {name} 到 Claude 用户级配置？"):
+                    run([which("claude"), "mcp", "add", "--scope", "user", name, cmd], capture=False)
+        config = HOME / ".codex" / "config.toml"
+        if which("codex"):
+            if config.exists() and f"[mcp_servers.{name}]" in config.read_text():
+                ok(f"Codex 已注册 {name}")
+            else:
+                warn(f"Codex 未注册 {name}")
+                if ask(f"注册 {name} 到 Codex？"):
+                    run([which("codex"), "mcp", "add", name, "--", cmd], capture=False)
+
+
+def step_browser():
+    """共享浏览器：Playwright MCP、Chromium、虚拟屏幕（Xvfb）、远程查看（x11vnc）、技能说明"""
+    cli = PLAYWRIGHT_MCP / "node_modules" / "@playwright" / "mcp" / "cli.js"
+    if cli.exists():
+        ok(f"Playwright MCP（{PLAYWRIGHT_MCP}）")
+    elif not which("npm"):
+        warn("缺少 Node.js，无法安装 Playwright MCP")
+    else:
+        warn("缺少 Playwright MCP")
+        if ask(f"安装 @playwright/mcp@{PLAYWRIGHT_MCP_VERSION} 到 {PLAYWRIGHT_MCP}？"):
+            PLAYWRIGHT_MCP.mkdir(parents=True, exist_ok=True)
+            run([which("npm"), "install", "--prefix", str(PLAYWRIGHT_MCP), "--no-audit", "--no-fund",
+                 f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}"], capture=False)
+    if list((HOME / ".cache" / "ms-playwright").glob("chromium-*/chrome-linux*/chrome")) or IS_MAC:
+        ok("Chromium")
+    elif (PLAYWRIGHT_MCP / "node_modules" / "playwright" / "cli.js").exists():
+        warn("缺少 Chromium")
+        if ask("下载 Playwright 的 Chromium？"):
+            run([which("node"), str(PLAYWRIGHT_MCP / "node_modules" / "playwright" / "cli.js"), "install", "chromium"],
+                capture=False)
+    if IS_MAC:
+        info("macOS 上暂不支持浏览器池的虚拟屏幕（Xvfb），共享浏览器先只在 Linux 上可用")
+    else:
+        missing = [n for n, binary in (("xvfb", "Xvfb"), ("x11vnc", "x11vnc")) if not shutil.which(binary)]
+        if not missing:
+            ok("Xvfb / x11vnc")
         else:
-            warn("Claude 未注册 local-sessions")
-            if ask("注册到 Claude 用户级配置？"):
-                run([which("claude"), "mcp", "add", "--scope", "user", "local-sessions", MCP_CMD], capture=False)
-    config = HOME / ".codex" / "config.toml"
-    if which("codex"):
-        if config.exists() and "[mcp_servers.local-sessions]" in config.read_text():
-            ok("Codex 已注册 local-sessions")
+            warn(f"缺少 {', '.join(missing)}")
+            cmd = package_install_command(missing)
+            if cmd and ask(f"现在执行 `{cmd}`？（可能要求输入 sudo 密码）"):
+                run(cmd, shell=True, capture=False)
+    skill = (TEMPLATES / "skills" / "shared-browser" / "SKILL.md").read_text()
+    for root in (HOME / ".claude" / "skills", HOME / ".codex" / "skills"):
+        if not root.parent.exists():
+            continue
+        target = root / "shared-browser" / "SKILL.md"
+        if target.exists() and target.read_text() == skill:
+            ok(f"技能 shared-browser（{target.parent}）")
         else:
-            warn("Codex 未注册 local-sessions")
-            if ask("注册到 Codex？"):
-                run([which("codex"), "mcp", "add", "local-sessions", "--", MCP_CMD], capture=False)
+            warn(f"技能 shared-browser 未安装或不是最新（{target.parent}）")
+            if ask(f"安装/更新技能 shared-browser 到 {target.parent}？"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(skill)
+                ok(f"已写入 {target}")
 
 
 def step_rules():
@@ -610,7 +660,7 @@ def step_verify():
 
 
 STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": step_cli_auth,
-         "telegram": step_telegram, "hooks": step_hooks, "mcp": step_mcp, "rules": step_rules,
+         "telegram": step_telegram, "hooks": step_hooks, "mcp": step_mcp, "browser": step_browser, "rules": step_rules,
          "gitlab": step_gitlab, "service": step_service, "verify": step_verify}
 
 
