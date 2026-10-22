@@ -1212,7 +1212,7 @@ async def ensure_quick_keyboard(bot, chat_id: int, thread_id: int) -> None:
     if thread_id in done:
         return
     await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, disable_notification=True,
-                           text="⌨️ 常用操作已固定在输入框下方：📸 看终端、⏹ 中断（只作用于当前 Thread）",
+                           text="常用操作已固定在输入框下方：看终端、中断（只作用于当前 Thread）",
                            reply_markup=quick_keyboard())
     done.add(thread_id)
     KEYBOARD_FILE.write_text(json.dumps(sorted(done)))

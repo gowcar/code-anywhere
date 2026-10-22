@@ -202,7 +202,7 @@ class PrivateModeTests(unittest.TestCase):
                 return handled, first_batch, quiet
         handled, first_batch, quiet = asyncio.run(scenario())
         self.assertTrue(handled)                                    # 调用方不再逐条发
-        self.assertEqual(first_batch, ["⚡ ls", "⚡ pytest\n（另有 2 个动作）"])
+        self.assertEqual(first_batch, ["ls", "pytest（另有 2 个动作）"])
         self.assertEqual(quiet, 2)
         self.assertIn("仍在运行", sent[-1])
         self.assertEqual(bot.sent, [])                              # 没有状态卡

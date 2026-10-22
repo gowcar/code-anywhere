@@ -430,7 +430,8 @@ class Monitor:
         if not topic.digest_pending or not tools or topic.state == "idle" and topic.turn_started is None:
             return
         extra = topic.digest_pending - 1
-        text = tools[-1][0] + (f"\n（另有 {extra} 个动作）" if extra > 0 else "")
+        latest = re.sub(r"^\W+\s*", "", tools[-1][0])  # 去掉开头的 ⚡ 等符号：列表里只留状态灯一种符号
+        text = latest + (f"（另有 {extra} 个动作）" if extra > 0 else "")
         topic.digest_pending, topic.digest_at, topic.card_updated = 0, time.time(), time.time()
         if time.time() < self.paused_until:
             return
@@ -448,9 +449,9 @@ class Monitor:
         topic.card_updated = now
         snap = topic.snapshot
         facts = " · ".join(x for x in (human_elapsed(now - topic.turn_started),
-                                        f"{snap.tokens} tokens" if snap.tokens else "") if x)
+                                        f"{snap.tokens.lstrip('↓↑ ')} tokens" if snap.tokens else "") if x)
         from src.renderer import send_ephemeral
-        await send_ephemeral(self.bot, self.chat_id, f"{SPINNER[topic.frame % len(SPINNER)]} 仍在运行 · {facts}",
+        await send_ephemeral(self.bot, self.chat_id, f"仍在运行 · {facts}",
                              ttl=6.0, message_thread_id=topic.topic_id, parse_mode=None)
 
     async def _update_card(self, topic: Topic, now: float, force: bool):
