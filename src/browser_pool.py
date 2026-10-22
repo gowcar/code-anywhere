@@ -40,6 +40,9 @@ RELAY_LISTEN = os.getenv("BROWSER_HELP_LISTEN", "")             # 中转机对�
 RELAY_PUBLIC_URL = os.getenv("BROWSER_HELP_PUBLIC_URL", "")     # 手机打开的地址，如 https://nas.im:36801
 RELAY_PORT = int(os.getenv("BROWSER_HELP_RELAY_PORT", "16801"))  # 中转机本机上的隧道口
 RELAY_WEBSOCKIFY = os.getenv("BROWSER_HELP_WEBSOCKIFY", "")     # 中转机上起 noVNC 的命令前缀（不含监听与目标）
+# 对外端口原本被别的服务占着时，结束后用这条命令恢复它。照抄原进程命令行不可靠（依赖它启动时的环境，
+# 2026-10-23 实测恢复失败），所以要求配置一条确认能用的命令；不配置就只停不恢复，并在 TG 里说明
+RELAY_RESTORE = os.getenv("BROWSER_HELP_RESTORE", "")
 
 _leases: dict[int, dict] = {}        # 槽位 → {client, session_id, cwd, since, conns, release_task}
 _last_used: dict[int, float] = {}
@@ -271,6 +274,11 @@ def _schedule_release(slot: int, client: str) -> None:
 
 async def monitor() -> None:
     """空闲回收：没人租用超过 IDLE_STOP 的槽位停掉；接管超时收尾。"""
+    if help_available():  # 桥接重启会丢掉接管状态：中转机上残留的临时 noVNC 先停掉，原服务恢复
+        try:
+            await _relay("stop")
+        except Exception:
+            log.warning("[browser] 启动时清理中转机失败", exc_info=True)
     while True:
         await asyncio.sleep(60)
         now = time.time()
@@ -385,25 +393,26 @@ def _relay_script(action: str) -> str:
     if action == "start":
         return f"""set -e
 mkdir -p ~/.code-anywhere && cd ~/.code-anywhere
+ok=; for i in $(seq 20); do nc -z 127.0.0.1 {RELAY_PORT} 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ -n "$ok" ] || {{ echo "ssh 反向隧道没有建立（127.0.0.1:{RELAY_PORT} 不通）：检查中转机 authorized_keys 是否允许端口转发" >&2; exit 3; }}
 if [ -f novnc.pid ] && kill -0 "$(cat novnc.pid)" 2>/dev/null; then kill "$(cat novnc.pid)"; sleep 0.5; fi
 old=$(lsof -nP -t -iTCP@{host}:{port} -sTCP:LISTEN 2>/dev/null | head -1 || true)
 if [ -n "$old" ]; then
-  [ -f saved.cmd ] || ps -o command= -p "$old" > saved.cmd
-  [ -f saved.cwd ] || lsof -a -p "$old" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' > saved.cwd
+  [ -f saved.flag ] || ps -o command= -p "$old" > saved.flag
   kill "$old"; for i in $(seq 30); do kill -0 "$old" 2>/dev/null || break; sleep 0.1; done
 fi
 nohup {RELAY_WEBSOCKIFY} {host}:{port} 127.0.0.1:{RELAY_PORT} > novnc.log 2>&1 &
 echo $! > novnc.pid
 sleep 1; kill -0 "$(cat novnc.pid)" && echo started
 """
-    return """cd ~/.code-anywhere 2>/dev/null || exit 0
+    restore = (f'nohup {RELAY_RESTORE} > ~/.code-anywhere/restored.log 2>&1 &\n  sleep 1; echo restored'
+               if RELAY_RESTORE else 'echo "stopped-original"')
+    return f"""cd ~/.code-anywhere 2>/dev/null || exit 0
 if [ -f novnc.pid ]; then kill "$(cat novnc.pid)" 2>/dev/null; rm -f novnc.pid; fi
 sleep 0.5
-if [ -f saved.cmd ]; then
-  dir=$(cat saved.cwd 2>/dev/null); [ -n "$dir" ] && cd "$dir"
-  nohup $(cat ~/.code-anywhere/saved.cmd) > ~/.code-anywhere/restored.log 2>&1 &
-  rm -f ~/.code-anywhere/saved.cmd ~/.code-anywhere/saved.cwd
-  echo restored
+if [ -f saved.flag ]; then
+  rm -f saved.flag
+  {restore}
 fi
 """
 
@@ -499,7 +508,8 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
     from src.api_server import _bot
     from src import config
     if _bot and item.get("message_id"):
-        label = {"done": "✅ 已完成", "timeout": "⌛ 已超时，远程查看已关闭", "failed": "⚠️ 未能打开远程查看"}[status]
+        label = {"done": "✅ 已完成", "timeout": "⌛ 已超时，远程查看已关闭", "failed": "⚠️ 未能打开远程查看",
+                 "cancelled": "已取消，远程查看已关闭"}[status]
         try:
             await _bot.edit_message_text(chat_id=config.CHAT_ID, message_id=item["message_id"], parse_mode=None,
                                          text=f"🖥 共享浏览器：{item['reason']}\n\n{label}")
@@ -543,6 +553,11 @@ async def handle_help(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
 
 
+async def handle_help_cancel(request: web.Request) -> web.Response:
+    await finish_help(request.match_info["id"], "cancelled")
+    return web.json_response(help_status(request.match_info["id"]))
+
+
 async def handle_help_status(request: web.Request) -> web.Response:
     return web.json_response(help_status(request.match_info["id"]))
 
@@ -559,4 +574,5 @@ def add_routes(app: web.Application) -> None:
     app.router.add_get("/browser/cdp/{client}/ws", handle_ws)
     app.router.add_post("/browser/help", handle_help)
     app.router.add_get("/browser/help/{id}", handle_help_status)
+    app.router.add_post("/browser/help/{id}/cancel", handle_help_cancel)
     app.router.add_get("/browser/status", handle_status)

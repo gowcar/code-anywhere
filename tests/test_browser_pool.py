@@ -58,13 +58,16 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(pool.SLOTS, pool.MAX_SLOTS)
 
     def test_relay_script_saves_and_restores_existing_service(self):
-        with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"):
+        with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"), \
+             patch.object(pool, "RELAY_RESTORE", "ws/run --ssl-only 10.0.1.188:6801 10.0.1.188:5900"):
             start, stop = pool._relay_script("start"), pool._relay_script("stop")
         self.assertIn("-iTCP@10.0.1.188:6801", start)
-        self.assertIn("saved.cmd", start)
+        self.assertIn("nc -z 127.0.0.1 16801", start)      # 隧道不通就报错，不起 noVNC
+        self.assertIn("saved.flag", start)
         self.assertIn("ws/run --ssl-only 10.0.1.188:6801 127.0.0.1:16801", start)
-        self.assertIn("saved.cmd", stop)
-        self.assertIn("restored", stop)
+        self.assertIn("nohup ws/run --ssl-only 10.0.1.188:6801 10.0.1.188:5900", stop)
+        with patch.object(pool, "RELAY_RESTORE", ""):
+            self.assertIn("stopped-original", pool._relay_script("stop"))
 
 
 if __name__ == "__main__":
