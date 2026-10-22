@@ -104,6 +104,32 @@ class RoutingTests(unittest.TestCase):
                 asyncio.run(bot._handle_message(upd, SimpleNamespace(bot=None)))
             self.assertEqual(mark.called, quoted, screen)
 
+    def test_clear_refuses_busy_and_sends_engine_command(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        cases = (("claude", "✢ Proofing… (8s · ↓ 1k tokens)", None),
+                 ("claude", "────\n❯ \n────", "/clear"),
+                 ("codex", "› Ask Codex to do anything", "/new"))
+        for backend, screen, expected in cases:
+            msg = SimpleNamespace(message_thread_id=4699, chat_id=42, chat=SimpleNamespace(type="private"),
+                                  reply_text=AsyncMock())
+            upd = SimpleNamespace(effective_user=SimpleNamespace(id=1), message=msg, effective_message=msg)
+            with patch.object(bot, "auth_check", return_value=True), \
+                 patch.object(bot.projects, "get_path", return_value="/w/ca"), \
+                 patch.object(bot.backends, "get_backend", return_value=backend), \
+                 patch.object(bot, "_find_pane_for_project", AsyncMock(return_value="%1")), \
+                 patch.object(bot, "_capture_pane", AsyncMock(return_value=screen)), \
+                 patch.object(bot.backends, "command", AsyncMock()) as command, \
+                 patch.object(bot.asyncio, "sleep", AsyncMock()):
+                asyncio.run(bot.cmd_clear(upd, SimpleNamespace()))
+            typed = [c.args[-1] for c in command.await_args_list if "-l" in c.args]
+            if expected:
+                self.assertEqual(typed, [expected])
+                self.assertIn("已清空", msg.reply_text.await_args.args[0])
+            else:
+                self.assertEqual(typed, [])
+                self.assertIn("正在干活", msg.reply_text.await_args.args[0])
+
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \
              patch.object(bot.state, "get_cwd", return_value="/w/legacy"):
