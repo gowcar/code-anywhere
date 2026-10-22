@@ -94,5 +94,27 @@ The legacy sender argument is ignored. Self-targeting is rejected.
                       {'text': text, 'request_id': request_id, 'source_session_id': source})
 
 
+@mcp.tool()
+async def send_urgent_message(session_id: str, text: str, request_id: str) -> dict:
+    """Send an URGENT message that may interrupt a working session's queue.
+
+Use ONLY when the user explicitly marked the matter urgent (e.g. a GitLab issue
+labelled priority:urgent, or the user said 紧急/立即/插队). Ordinary feedback
+must use send_message, which never disturbs a working session.
+
+Unlike send_message, a working (running) target is accepted: the text is typed
+into its terminal and both CLIs insert it at the target's next tool call, so it
+lands mid-task without aborting. Targets showing a confirmation prompt or an
+unrecognised screen are still refused (not_sent).
+
+Same one-sentence (+ md path) format, request_id and receipt rules as
+send_message. A running target usually returns unconfirmed first; poll
+get_session_feedback with the request_id for the receipt instead of resending.
+"""
+    sessions = (await call('GET'))['sessions']
+    source = source_session(sessions, caller_processes())
+    return await call('POST', '/' + quote(session_id, safe='') + '/messages',
+                      {'text': text, 'request_id': request_id, 'source_session_id': source, 'urgent': True})
+
 if __name__ == '__main__':
     mcp.run(transport='stdio')

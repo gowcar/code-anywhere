@@ -47,6 +47,32 @@ class SessionToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'not_sent')
         inject.assert_not_awaited()
 
+    async def test_urgent_enters_working_session_and_counts_queued_receipt(self):
+        self.session['status'] = 'running'
+        async def inject(pane, text):  # Claude 一轮进行中收到的输入记为 queued_command 附件
+            with self.path.open('a') as f:
+                f.write(json.dumps({'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': text}}) + '\n')
+        with patch.object(service, 'discover', AsyncMock(return_value=[self.session])), \
+             patch('src.bot._inject_tmux', AsyncMock(side_effect=inject)) as write:
+            result = await service.send_message(self.session['session_id'], 'hotfix', 'urgent-1', urgent=True)
+        self.assertEqual(result['status'], 'received')
+        self.assertIn('[Urgent agent message urgent-1 from', write.await_args.args[1])
+
+    async def test_urgent_still_refuses_confirmation_prompt(self):
+        self.session['status'] = 'waiting_confirmation'
+        with patch.object(service, 'discover', AsyncMock(return_value=[self.session])), \
+             patch('src.bot._inject_tmux', AsyncMock()) as write:
+            result = await service.send_message(self.session['session_id'], 'hotfix', 'urgent-2', urgent=True)
+        self.assertEqual(result['status'], 'not_sent')
+        write.assert_not_awaited()
+
+    async def test_urgent_and_normal_requests_do_not_share_an_id(self):
+        with patch.object(service, 'discover', AsyncMock(return_value=[self.session])), \
+             patch('src.bot._inject_tmux', AsyncMock()), patch.object(service.asyncio, 'sleep', AsyncMock()):
+            await service.send_message(self.session['session_id'], 'hello', 'same-1')
+            with self.assertRaises(ValueError):
+                await service.send_message(self.session['session_id'], 'hello', 'same-1', urgent=True)
+
     async def test_receipt_idempotency_and_conflicting_retry(self):
         async def inject(pane, text):
             with self.path.open('a') as f:

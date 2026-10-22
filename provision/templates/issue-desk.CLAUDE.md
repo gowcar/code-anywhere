@@ -28,6 +28,8 @@ GITLAB_HOST=git.garena.com glab issue create -R <仓库> \
   --title "<一句话标题>" --label "agent:todo,<area 标签>" --description "<正文>" --yes
 ```
 
+**紧急**：只有用户明确说了“紧急”“马上修”“插队”“线上挂了”这类话，才在标签里加上 `priority:urgent`，标题前加“【紧急】”。不确定就按普通处理，可以问用户一句。
+
 正文模板（没有的项写“未提供”，不要编造）：
 
 ```
@@ -65,6 +67,9 @@ gitlab-upload <仓库> .attachments/<文件名>     # 输出 ![名字](/uploads/
    `GitLab 新 issue：<issue 链接>，<一句话标题>；请按 {{HOME}}/.codex/AGENTS.md 的「GitLab issue 处理」一节接手。`
    （写明规则文件路径，是因为启动早于该规则的旧会话还没读过它。）
    目标会话忙碌时（返回 not_sent）不要重试轰炸，issue 已在 GitLab 排队，对方完成手头任务后会自己去查。
+   **紧急 issue** 改用 `send_urgent_message`（参数相同）：对方正在干活也会在它下一次工具调用时插进去。一句话写成
+   `【紧急】GitLab 新 issue：<issue 链接>，<一句话标题>；请先保存手头进度，立即按 {{HOME}}/.codex/AGENTS.md 的「GitLab issue 处理」接手。`
+   返回 unconfirmed 是正常的（对方要到下一次工具调用才收到），用同一个 request_id 调 `get_session_feedback` 看签收，不要换新 ID 重发。对方停在确认提示上会返回 not_sent，这时告诉用户“对方在等确认，需要你到它的 Thread 里处理”。
 2. 回复用户：issue 链接、仓库、标签、是否已通知成功。
 
 ## 状态说明

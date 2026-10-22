@@ -163,6 +163,21 @@ async def discover():
     return sessions
 
 
+def receipt_seen(path, offset, marker):
+    """Native receipt: a user message, or Claude's queued_command attachment for
+    input that arrived mid-turn (inserted at the next tool call)."""
+    for event in tail_events(path, offset):
+        if event.get('type') == 'attachment':
+            attachment = event.get('attachment') or {}
+            if attachment.get('type') == 'queued_command' and marker in json.dumps(attachment, ensure_ascii=False):
+                return True
+            continue
+        role, body = public_text(event)
+        if role == 'user' and marker in body:
+            return True
+    return False
+
+
 def visible(session):
     return {key: value for key, value in session.items() if not key.startswith('_')}
 
@@ -192,8 +207,7 @@ async def get_feedback(session_id, request_id=None):
         if receipt and receipt['session_id'] != session_id:
             raise ValueError('request_id belongs to another session')
         if receipt and receipt['status'] == 'unconfirmed' and receipt.get('_marker'):
-            if any(role == 'user' and receipt['_marker'] in body
-                   for role, body in map(public_text, tail_events(receipt['_transcript'], receipt['_offset']))):
+            if receipt_seen(receipt['_transcript'], receipt['_offset'], receipt['_marker']):
                 receipt.update(status='received', detail='native user-message receipt observed after send returned')
                 db = receipt_db()
                 try:
@@ -257,7 +271,13 @@ async def resolve_sender(source_session_id, sender):
     return sender, None
 
 
-async def send_message(session_id, text, request_id, sender=None, source_session_id=None):
+# Urgent messages may enter a working session: both CLIs insert input typed
+# mid-turn at the next tool call. A confirmation prompt or unknown screen is
+# still refused — typed text there could answer the prompt.
+URGENT_STATES = {'waiting_input', 'running'}
+
+
+async def send_message(session_id, text, request_id, sender=None, source_session_id=None, urgent=False):
     if not isinstance(text, str) or not text.strip() or len(text) > 16000:
         raise ValueError('text must contain 1–16000 characters')
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', request_id or ''):
@@ -266,7 +286,9 @@ async def send_message(session_id, text, request_id, sender=None, source_session
     if source_session_id == session_id:
         return {'request_id': request_id, 'session_id': session_id,
                 'status': 'not_sent', 'detail': 'self-target forbidden', 'sender': sender}
-    fingerprint = hashlib.sha256(json.dumps([session_id, text, sender] + ([source_session_id] if source_session_id else [])).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([session_id, text, sender] + ([source_session_id] if source_session_id else [])
+                                            + (['urgent'] if urgent else [])).encode()).hexdigest()
+    allowed = URGENT_STATES if urgent else {'waiting_input'}
     # Persist before any write. After a crash an uncertain request is never resent.
     db = receipt_db()
     try:
@@ -288,8 +310,10 @@ async def send_message(session_id, text, request_id, sender=None, source_session
             session = next((s for s in await discover() if s['session_id'] == session_id), None)
             if not session:
                 result.update(status='not_sent', detail='session exited or changed; refresh list')
-            elif session['status'] != 'waiting_input':
-                result.update(status='not_sent', detail='target is not confirmed idle; inspect status and retry with a new request_id later')
+            elif session['status'] not in allowed:
+                result.update(status='not_sent', detail=(
+                    f"target is {session['status']} (only idle or working sessions accept urgent messages)" if urgent else
+                    'target is not confirmed idle; inspect status and retry with a new request_id later'))
             elif not session['_transcript']:
                 result.update(status='not_sent', detail='cannot locate transcript to confirm delivery')
             else:
@@ -299,12 +323,12 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                             if s.get('tmux_pane') == session['tmux_pane']), session['cwd'])
                 async with _project_locks.setdefault(cwd, asyncio.Lock()):
                     current = next((s for s in await discover() if s['session_id'] == session_id), None)
-                    if not current or current['status'] != 'waiting_input':
+                    if not current or current['status'] not in allowed:
                         result.update(status='not_sent', detail='target changed or is no longer idle')
                     else:
                         path = current['_transcript']
                         offset = Path(path).stat().st_size
-                        marker = f'[Agent message {request_id} from {sender}]'
+                        marker = f"[{'Urgent agent' if urgent else 'Agent'} message {request_id} from {sender}]"
                         result['sent_at'] = time.time()
                         result.update(_transcript=path, _offset=offset, _marker=marker)
                         db = receipt_db()
@@ -315,9 +339,11 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                             db.close()
                         await _inject_tmux(current['tmux_pane'], marker + '\n' + text)
                         result.update(detail='written to terminal; native receipt not yet confirmed')
+                        if urgent and current['status'] == 'running':
+                            result.update(detail='written while target was working; it is inserted at the '
+                                                 'next tool call — check get_session_feedback with this request_id')
                         for _ in range(20):
-                            if any(role == 'user' and marker in body
-                                   for role, body in map(public_text, tail_events(path, offset))):
+                            if receipt_seen(path, offset, marker):
                                 result.update(status='received', detail='native user-message receipt observed; not a task completion')
                                 break
                             await asyncio.sleep(.25)
@@ -355,7 +381,8 @@ async def handle_send(request):
     try:
         data = await request.json()
         result = await send_message(request.match_info['id'], data.get('text'),
-                                    data.get('request_id'), data.get('sender'), data.get('source_session_id'))
+                                    data.get('request_id'), data.get('sender'), data.get('source_session_id'),
+                                    urgent=data.get('urgent') is True)
         return web.json_response(result)
     except (ValueError, TypeError, AttributeError) as exc:
         return web.json_response({'error': str(exc)}, status=400)
