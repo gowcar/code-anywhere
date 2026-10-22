@@ -14,13 +14,6 @@ from common import read_stdin, post_to_bot
 
 data = read_stdin()
 
-# Skip bot's own project
-import pathlib
-_cwd = data.get("cwd", "")
-_self_dir = str(pathlib.Path(__file__).parent.parent.resolve())
-if _cwd == _self_dir:
-    sys.exit(0)
-
 # 只有 Bot 发起的会话才通知
 if not os.environ.get("TELEGRAM_CHAT_ID"):
     sys.exit(0)

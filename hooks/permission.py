@@ -16,12 +16,8 @@ from common import read_stdin, post_to_bot
 
 data = read_stdin()
 
-# Skip bot's own project
 import pathlib
 _cwd = data.get("cwd", "")
-_self_dir = str(pathlib.Path(__file__).parent.parent.resolve())
-if _cwd == _self_dir:
-    sys.exit(0)
 
 # Skip sessions marked by other services (e.g. claude-agent)
 if os.environ.get("CODE_ANYWHERE_SKIP"):

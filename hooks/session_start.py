@@ -14,12 +14,10 @@ from common import read_stdin, post_to_bot
 
 data = read_stdin()
 
-# Skip bot's own project
+# code-anywhere 自己也是有 Thread 的普通项目，不再跳过（初版曾跳过，导致本项目 /clear 后桥接不换会话）
 import pathlib
 _cwd = data.get("cwd", "")
 _self_dir = str(pathlib.Path(__file__).parent.parent.resolve())
-if _cwd == _self_dir:
-    sys.exit(0)
 
 # Skip sessions marked by other services (e.g. claude-agent)
 if os.environ.get("CODE_ANYWHERE_SKIP"):
