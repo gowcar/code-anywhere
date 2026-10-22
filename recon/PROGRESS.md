@@ -1,6 +1,7 @@
 # PROGRESS — code-anywhere 作战地图
 > 单一真相源。新 session 第一件事就读它。
 ## 📍 当前位置
+**2026-10-22 TG 新特性评估 🟢**：`docs/TG-API-FEATURES.md`（Bot API 9.0～10.3）。关键可用：私聊话题、sendMessageDraft 草稿当底部状态卡且不占编辑额度、10.3 can_stop 原生停止→/abort、10.1+ 富文本（折叠、思考块、表格）与 10.3 富文本内按钮（/issues 每项自带按钮）、按钮颜色/置灰、表情回应代替回执、9.6 t.me/newbot 简化建 bot。PTB 22.8=API 10.0，10.1+ 需 do_api_request。/issues 已改列表+详情（提交见 git log）。
 **2026-10-22 夜间收尾 🟢**：外脑规则进全局模板（Claude/Codex 通用）；/issues 按钮（通过/不通过+回复原因/放弃二次确认，自动通知负责会话，ea804cf）；状态卡加锁防重复、编号落盘重启清理；私聊模式方案 `docs/PRIVATE-TOPICS-PLAN.md`（用户决定用新 bot 私聊话题；sendMessageDraft 草稿气泡可作底部实时状态，PTB 22.8 已支持）。待用户：TG 试 /issues 按钮、/new、/model、视频；建新 bot 开话题；新服务器 ./setup；digital-buddy#1 缺验证方法：03:47 复查 %39 仍 running，未发通知，留待其空闲或用户处理。
 **2026-10-22 GitLab issue 流程 🟢 已上线**：glab v1.124.0（`~/.local/bin`）以 PAT `~/.config/gitlab-token`(600, api) 登录 kong，git 协议 ssh；4 仓库均 Owner、issues 开启。kong/seatalk-workspace 实测 create/list/relabel/close 通过，测试 issue 已用 API 删除（注意 `glab issue delete --yes` 静默未删）。issue-desk：`~/workspace/issue-desk/CLAUDE.md` 别名路由 + 模板，bypass，Claude pane %64 sid 2d680dbf，TG topic 75269，watcher 已接。全局 CLAUDE.md/AGENTS.md 含「GitLab issue 处理」（agent:todo→doing→Closes/blocked）。
 **2026-10-20 seatalk会话跨session来信盘点 🟢**：digital-buddy-seatalk(%44)原生rollout共26条Agent message（10-15至10-19），20条来自digital-buddy-ios（10-17单日16条），digital-buddy 3、apex/code-anywhere/未识别各1；无Codex Goal。重启后：code-anywhere.service已enable+linger自动起；tmux会话不保留，桥接收到TG消息后Codex按.codex-sessions.json自动resume，Claude为新会话(不resume)，本对话需手动 `claude --resume a9961ee0-339e-457c-a8a5-7761fc7acc51`。
