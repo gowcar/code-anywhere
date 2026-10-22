@@ -1270,6 +1270,66 @@ async def _deliver_message(update, context, album_messages=None):
             await update.message.reply_text("⚠️ 消息投递失败，请查看 /model 和服务日志后重试。")
 
 
+RECEIPT_IDLE_WAIT = 15      # 空闲会话：这么久还没在会话日志里看到用户原文，就提醒
+RECEIPT_BUSY_WAIT = 180     # 忙碌会话：消息会先排队，等这一轮结束才写进日志
+
+
+async def _transcript_position(pane: str, cwd: str) -> tuple[str, int] | None:
+    """投递前记下当前会话日志的路径和大小，之后只看新增部分。"""
+    try:
+        if backends.get_backend(cwd) == "codex":
+            found = await backends.codex_transcript(pane, cwd)
+            path = found[1] if found else None
+        else:
+            from src.api_server import terminal_sessions
+            path = next((v.get("transcript_path") for v in terminal_sessions.values()
+                         if v.get("tmux_pane") == pane and v.get("transcript_path")), None)
+        if not path:
+            return None
+        return path, (Path(path).stat().st_size if Path(path).exists() else 0)
+    except Exception:
+        return None
+
+
+def receipt_snippet(text: str) -> str:
+    """用来在会话日志里认出这条消息的片段：优先取第一行非附件文字，否则取附件文件名。"""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    words = [l for l in lines if not l.startswith("@") and not l.startswith("[引用消息]")]
+    if words:
+        return words[0][:24]
+    return Path(lines[0].lstrip("@")).name[:40] if lines else ""
+
+
+async def _confirm_delivery(message, pane: str, cwd: str, text: str, path: str, offset: int):
+    """确认会话日志里出现了用户原文。Codex 开着 Goal 时曾把用户消息替换成 Goal 续跑指令（2026-10-22），
+    这类“消息悄悄丢了”必须让用户知道。"""
+    from src import liveness
+    from src.agent_sessions import public_text, tail_events
+    snippet = receipt_snippet(text)
+    if not snippet:
+        return
+    topic = message.message_thread_id
+    busy = (liveness._topics.get(topic) is not None and liveness._topics[topic].state != "idle")
+    deadline = time.time() + (RECEIPT_BUSY_WAIT if busy else RECEIPT_IDLE_WAIT)
+    while time.time() < deadline:
+        await asyncio.sleep(1.0)
+        try:
+            if any(role == "user" and snippet in (body or "") for role, body in map(public_text, tail_events(path, offset, limit=4 << 20))):
+                return
+        except Exception:
+            return
+    screen = await _capture_pane(pane)
+    if busy and snippet in screen:  # 还在队列里排着：没丢，只是这一轮还没做完
+        return
+    where = "停在终端输入框里没有发出去" if snippet in screen else "没有进入会话"
+    log.warning("[receipt] 消息未被会话签收 pane=%s where=%s snippet=%s", pane, where, snippet)
+    try:
+        await message.reply_text(f"⚠️ 这条消息{where}，会话没收到。请重发；如果一直这样，可以 /screen 看看终端状态。\n\n原文：{text[:500]}",
+                                 parse_mode=None)
+    except Exception:
+        pass
+
+
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, album_messages=None):
     if not auth_check(update.effective_user.id):
         user = update.effective_user
@@ -1419,7 +1479,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
         mark_tg_input(topic_id, text)
         mark_tg_reply_target(topic_id, message.message_id)
     start_typing(context.bot, chat_id, session_key)
+    receipt_from = await _transcript_position(target_pane, cwd)
     await _inject_tmux(target_pane, text)
+    if receipt_from:  # 后台确认会话真的收到了这条消息，丢了就提醒（不阻塞后续投递）
+        asyncio.create_task(_confirm_delivery(message, target_pane, cwd, text, *receipt_from))
     # 👀：已送进会话；这一轮结束时 liveness 改成 👌。只在群组模式：私聊里 bot 的表情回应会触发
     # 客户端的“新回应”提示（💟 角标），用户要求私聊关闭（2026-10-22）
     if not is_private and topic_id and not _private_thread_mode():
