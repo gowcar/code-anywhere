@@ -85,10 +85,11 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(self.bot.sent), 1)                    # 第一条工具调用立刻出卡片
         self.assertEqual(topic.state, "running")
         self.assertEqual([d for d, _ in liveness._last_tool[7]], [f"⚡ step {i}" for i in range(2, 6)])
-        self.assertIn("⚡ step 0", self.bot.sent[0]["text"])
+        self.assertIn("⚡ <code>step 0</code>", self.bot.sent[0]["text"])
+        self.assertEqual(self.bot.sent[0]["parse_mode"], "HTML")      # 路径不会被识别成 bot 命令链接
         text = liveness.card_text(topic, 2001.0)
         self.assertTrue(text.splitlines()[0][0] in liveness.SPINNER)
-        self.assertEqual(text.count("⚡ step"), 4)                  # 只滚动显示最近 4 条
+        self.assertEqual(text.count("⚡ <code>step"), 4)            # 只滚动显示最近 4 条
 
     def test_concurrent_updates_send_only_one_card(self):
         async def scenario():

@@ -1134,13 +1134,19 @@ async def _flush_media_group(key):
     await _deliver_message(update, batch["context"], [u.message for u in updates])
 
 
+def _private_thread_mode() -> bool:
+    """入口是 bot 私聊（CHAT_ID 为用户 ID，正数）而不是群组（负数）。"""
+    return bool(config.CHAT_ID) and int(config.CHAT_ID) > 0
+
+
 def _update_cwd(update: Update) -> str | None:
     msg = update.effective_message
     if not msg:
         return None
-    # 私聊话题模式（Bot API 9.3+）与群组话题一样按话题路由；私聊里不在话题内的消息才走单会话逻辑
+    # 私聊 Thread 模式（Bot API 9.3+）与群组话题一样按 Thread 路由；不在 Thread 里（All Messages）
+    # 的消息不对应任何项目，绝不能落到“上一次用过的目录”上
     if msg.chat.type == "private" and not msg.message_thread_id:
-        return state.get_cwd(msg.chat_id)
+        return None if _private_thread_mode() else state.get_cwd(msg.chat_id)
     return projects.get_path(msg.message_thread_id)
 
 
@@ -1228,6 +1234,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
 
     if not is_private and not topic_id:
         await message.reply_text("请在项目话题内发消息")
+        return
+    if is_private and _private_thread_mode():  # All Messages 里直接对话：不转发给任何会话
+        await message.reply_text("这里（All Messages）不会转给任何会话，请到对应项目的 Thread 里发消息。新项目可以用 /new 名字 创建。")
         return
 
     session_key = chat_id if is_private else topic_id
@@ -1345,6 +1354,11 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
 
 # ============ 构建 App ============
 
+def _strip_md(text: str) -> str:
+    import re
+    return re.sub(r"[*`#_]+", "", text)
+
+
 async def _send_topic_welcome(bot, chat_id: int, topic_id: int, name: str, path: str):
     """话题欢迎消息 + 最近对话上下文"""
 
@@ -1359,25 +1373,27 @@ async def _send_topic_welcome(bot, chat_id: int, topic_id: int, name: str, path:
         return
 
     # 渲染最近对话
-    lines = [f"<b>{name}</b> — 最近对话：\n"]
+    from src.renderer import md_to_tg_html
+    lines, plain = [f"<b>{html_lib.escape(name)}</b> — 最近对话：\n"], [f"{name} — 最近对话：\n"]
     for msg in history:
-        role = "👤" if msg["role"] == "user" else "🤖"
-        text = html_lib.escape(msg["text"][:200])
-        if len(msg["text"]) > 200:
-            text += "..."
-        lines.append(f"{role} {text}\n")
+        role = "👤" if msg["role"] == "user" else "✦"
+        raw = msg["text"][:300] + ("…" if len(msg["text"]) > 300 else "")
+        lines.append(f"{role} {md_to_tg_html(raw)}\n")  # 与正式回复一样渲染 Markdown
+        plain.append(f"{role} {_strip_md(raw)}\n")
     lines.append("\n直接发消息继续对话。")
+    plain.append("\n直接发消息继续对话。")
 
     full_text = "\n".join(lines)
-    # 截断避免超 4096
     if len(full_text) > 4000:
-        full_text = full_text[:4000] + "\n..."
-
-    await bot.send_message(
-        chat_id=chat_id, message_thread_id=topic_id,
-        text=full_text,
-        parse_mode="HTML",
-    )
+        full_text = "\n".join(plain)[:4000]  # 太长时退回纯文本，避免截断破坏 HTML 标签
+    try:
+        await bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=full_text,
+                               parse_mode="HTML" if len("\n".join(lines)) <= 4000 else None)
+        return
+    except Exception as exc:  # 截断的 Markdown 偶尔渲染出不合法的 HTML：退回去掉符号的纯文本
+        log.warning("[welcome] HTML 发送失败，改纯文本: %s", exc)
+        full_text = "\n".join(plain)[:4000]
+    await bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=full_text)
 
 
 def _save_chat_id(chat_id: int):

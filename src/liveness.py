@@ -229,16 +229,19 @@ def card_text(topic: Topic, now: float) -> str:
     spinner = SPINNER[topic.frame % len(SPINNER)]
     head = {"running": f"{spinner} 运行中", "retrying": "🔁 接口重试中", "stalled": "⚠️ 疑似卡住",
             "waiting": "🟡 等你审批或回答"}.get(topic.state, f"{spinner} 运行中")
-    lines = [f"{head} · {took}"]
+    # 以 HTML 发送：工具行放进 <code>，否则 Telegram 会把 /home/... 这类路径识别成蓝色的 bot 命令链接
+    lines = [f"{head} · {html.escape(took)}"]
     facts = [x for x in (f"{snap.tokens} tokens" if snap.tokens else "", f"上下文{snap.context}" if snap.context else "") if x]
     if facts:
-        lines.append(" · ".join(facts))
+        lines.append(html.escape(" · ".join(facts)))
     if topic.state in ("retrying", "stalled"):
         quiet = human_elapsed(now - topic.last_progress)
-        lines.append(f"{quiet}无进展" + (f"：{snap.detail}" if snap.detail else ""))
+        lines.append(html.escape(f"{quiet}无进展" + (f"：{snap.detail}" if snap.detail else "")))
     if tools := _last_tool.get(topic.topic_id):
         lines.append("")
-        lines += [f"{desc}  · {human_elapsed(now - at)}前" for desc, at in tools]
+        for desc, at in tools:
+            icon, _, rest = desc.partition(" ")
+            lines.append(f"{html.escape(icon)} <code>{html.escape(rest or icon)}</code> · {human_elapsed(now - at)}前")
     return "\n".join(lines)
 
 
@@ -412,7 +415,7 @@ class Monitor:
     async def send_alert(self, topic: Topic, now: float):
         snap = topic.snapshot
         reason = snap.detail or "token、会话日志和屏幕内容都没有变化"
-        text = (f"⚠️ 疑似卡住：已 {human_elapsed(now - topic.last_progress)} 没有进展\n原因线索：{reason}\n"
+        text = (f"⚠️ 疑似卡住：已 {human_elapsed(now - topic.last_progress)} 没有进展\n原因线索：{html.escape(reason)}\n"
                 "可以先看终端，确认后再决定是否中断。")
         topic.alert_id = await self._send(topic.topic_id, text, silent=False, markup=buttons(topic.topic_id))
 
@@ -439,7 +442,7 @@ class Monitor:
         try:
             self._spend()
             msg = await self.bot.send_message(chat_id=self.chat_id, message_thread_id=topic_id, text=text,
-                                              disable_notification=silent, reply_markup=markup)
+                                              disable_notification=silent, reply_markup=markup, parse_mode="HTML")
             return msg.message_id
         except Exception as exc:
             log.warning("[liveness] 发送失败 topic=%s: %s", topic_id, exc)
@@ -451,7 +454,7 @@ class Monitor:
         try:
             self._spend()
             await self.bot.edit_message_text(chat_id=self.chat_id, message_id=message_id, text=text,
-                                             reply_markup=markup)
+                                             reply_markup=markup, parse_mode="HTML")
         except Exception as exc:
             if "not found" in str(exc).lower() or "message_id_invalid" in str(exc).lower():
                 return False
