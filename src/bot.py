@@ -224,6 +224,11 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=f"✅ 新项目 {args[0]}\n目录：{path}{'（新建）' if created else '（已有目录）'}\n"
              f"引擎：{'Codex' if engine == 'codex' else 'Claude'}，正在启动…\n\n"
              "直接在这里说话开始。/model 切换模型、effort 和权限。")
+    if chat_id > 0:  # 私聊 Thread：输入框下方的快捷键盘
+        try:
+            await ensure_quick_keyboard(context.bot, chat_id, tid)
+        except Exception as exc:
+            log.warning("[keyboard] 发送快捷键盘失败 thread=%s: %s", tid, exc)
     async with _project_locks.setdefault(str(path), asyncio.Lock()):
         pane = await _ensure_pane_for_project(str(path), chat_id, tid)
     await context.bot.send_message(chat_id=chat_id, message_thread_id=tid,
@@ -1183,8 +1188,54 @@ def _update_cwd(update: Update) -> str | None:
     return projects.get_path(msg.message_thread_id)
 
 
+# 私聊 Thread 模式：输入框下方常驻的快捷按钮（回复键盘）。点了由桥接处理，不转给会话
+KEY_SCREEN, KEY_ABORT = "📸 看终端", "⏹ 中断"
+KEYBOARD_FILE = config.PROJECT_ROOT / ".reply-keyboard.json"
+
+
+def quick_keyboard():
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+    return ReplyKeyboardMarkup([[KeyboardButton(KEY_SCREEN), KeyboardButton(KEY_ABORT)]], resize_keyboard=True,
+                               is_persistent=True, input_field_placeholder="在这个 Thread 里继续对话")
+
+
+async def ensure_quick_keyboard(bot, chat_id: int, thread_id: int) -> None:
+    """每个私聊 Thread 只发一次带快捷键盘的说明消息（静默）。"""
+    import json
+    try:
+        done = set(json.loads(KEYBOARD_FILE.read_text()))
+    except (OSError, ValueError):
+        done = set()
+    if thread_id in done:
+        return
+    await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, disable_notification=True,
+                           text="⌨️ 常用操作已固定在输入框下方：📸 看终端、⏹ 中断（只作用于当前 Thread）",
+                           reply_markup=quick_keyboard())
+    done.add(thread_id)
+    KEYBOARD_FILE.write_text(json.dumps(sorted(done)))
+
+
+async def _handle_quick_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    message = update.message
+    if not message or message.text not in (KEY_SCREEN, KEY_ABORT):
+        return False
+    if not auth_check(update.effective_user.id):
+        return True
+    cwd = _update_cwd(update)
+    if not cwd:
+        await message.reply_text("请在项目 Thread 里使用")
+    elif message.text == KEY_SCREEN:
+        await _send_screen(message, cwd)
+    else:
+        await message.reply_text(await _abort_project(context.bot, cwd, message.chat_id, message.message_thread_id),
+                                 parse_mode=None)
+    return True
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    if await _handle_quick_key(update, context):
+        return
     if message and message.reply_to_message and auth_check(update.effective_user.id) \
             and await _handle_issue_reason(message):
         return
@@ -1393,7 +1444,18 @@ def _strip_md(text: str) -> str:
 
 
 async def _send_topic_welcome(bot, chat_id: int, topic_id: int, name: str, path: str):
-    """话题欢迎消息 + 最近对话上下文"""
+    """话题欢迎消息 + 最近对话上下文；私聊 Thread 模式再补上输入框下方的快捷键盘"""
+    try:
+        await _send_topic_welcome_text(bot, chat_id, topic_id, name, path)
+    finally:
+        if int(chat_id) > 0:
+            try:
+                await ensure_quick_keyboard(bot, chat_id, topic_id)
+            except Exception as exc:
+                log.warning("[keyboard] 发送快捷键盘失败 thread=%s: %s", topic_id, exc)
+
+
+async def _send_topic_welcome_text(bot, chat_id: int, topic_id: int, name: str, path: str):
 
     history = state.get_recent_history(path, max_turns=3)
 

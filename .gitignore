@@ -71,3 +71,6 @@ logs/*.json
 
 # Migration backups
 .migration-backup-*/
+
+# Threads that already got the quick reply keyboard
+.reply-keyboard.json

@@ -42,6 +42,21 @@ class RoutingTests(unittest.TestCase):
         abort.assert_awaited_once_with(context.bot, "/w/ios", 42, 4705)
         self.assertEqual(context.bot.send_message.await_args.kwargs["message_thread_id"], 4705)
 
+    def test_quick_keys_handled_by_bridge_not_forwarded(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        for key, target in ((bot.KEY_SCREEN, "_send_screen"), (bot.KEY_ABORT, "_abort_project")):
+            msg = SimpleNamespace(text=key, chat_id=42, message_thread_id=4707, chat=SimpleNamespace(type="private"),
+                                  reply_text=AsyncMock())
+            upd = SimpleNamespace(effective_user=SimpleNamespace(id=1), message=msg, effective_message=msg)
+            with patch.object(bot, "auth_check", return_value=True), \
+                 patch.object(bot.projects, "get_path", return_value="/w/desk"), \
+                 patch.object(bot, target, AsyncMock(return_value="⏹ 已中断当前回合")) as handler, \
+                 patch.object(bot, "_inject_tmux", AsyncMock()) as inject:
+                asyncio.run(bot.handle_message(upd, SimpleNamespace(bot=None)))
+            handler.assert_awaited_once()
+            inject.assert_not_awaited()
+
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \
              patch.object(bot.state, "get_cwd", return_value="/w/legacy"):

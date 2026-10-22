@@ -28,7 +28,7 @@ MOVE_EVERY = 45      # 状态卡挪到底部（删旧发新）的最小间隔，
 TOOL_LINES = 4       # 卡片里滚动显示的最近动作条数
 BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞上限流会整体暂停，正式回复遇限流会等待重发
 SPINNER = "◐◓◑◒"
-DRAFT_EVERY = 2.5    # 私聊模式：草稿气泡刷新间隔（草稿 30 秒不刷新就消失；同一 draft_id 的更新带过渡动画）
+HEARTBEAT = 60       # 私聊模式：运行中这么久没有任何动作，就冒一条会自动消散的“仍在运行”心跳
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
 TITLE_GAP = 60       # 同一话题两次改名的最小间隔
@@ -188,7 +188,7 @@ async def on_tool(topic_id: int, description: str) -> bool:
     if _monitor is None:
         return False
     await _monitor.tool_event(topic_id)
-    return True
+    return not _monitor.private_mode  # 私聊模式：照旧单独发、几秒后消散
 
 
 def _load_names() -> dict:
@@ -224,8 +224,10 @@ def _save_cards() -> None:
         log.warning("[liveness] 保存卡片编号失败", exc_info=True)
 
 
-def draft_id(topic_id: int) -> int:
-    return topic_id  # 每个 Thread 固定一个草稿编号：同编号的更新有过渡动画
+def draft_id(topic_id: int, frame: int = 0) -> int:
+    """每次刷新换一个编号：同编号的更新会被客户端做“逐字打出”的动画，开头一变就从头重打，
+    2.5 秒刷新一次时永远只显示出第一个字。换编号则直接整条替换。"""
+    return topic_id * 1000 + frame % 1000 + 1
 
 
 def card_text(topic: Topic, now: float, live: bool = False) -> str:
@@ -260,9 +262,10 @@ class Monitor:
         self.paused_until = 0.0  # TG 限流时暂停所有状态卡/改名调用，把额度让给正式回复
         self._flush: dict[int, asyncio.Task] = {}
         self._calls: deque = deque()
-        # 私聊 Thread 模式（chat_id 为用户 ID）：状态用 sendMessageDraft 草稿气泡——天然在最底部、
-        # 不占编辑额度、自带原生停止按钮；群组模式仍用可编辑的状态卡消息
-        self.draft_mode = int(chat_id) > 0
+        # 私聊 Thread 模式（chat_id 为用户 ID）：额度宽松，沿用“出现几秒后消散”的过程消息——
+        # 工具调用逐条显示，长时间无动作时每 HEARTBEAT 秒冒一条心跳；不发状态卡。
+        # （草稿气泡试过：客户端的逐字打出动画观感不好，2026-10-22 用户要求改回）
+        self.private_mode = int(chat_id) > 0
         _monitor = self
 
     def _min_gap(self) -> float:
@@ -277,6 +280,8 @@ class Monitor:
             topic.turn_started, topic.last_progress = now, now
             topic.state, topic.state_since = "running", now
         topic.last_progress = now
+        if self.private_mode:
+            return
         wait = topic.card_updated + self._min_gap() - now if topic.card_id else 0
         if self._paused():
             wait = max(wait, 10.0)  # 额度用完：动作先攒着，稍后合并进一次编辑
@@ -318,8 +323,6 @@ class Monitor:
         for tid, entry in _load_names().items():
             if entry.get("applied") != entry.get("base"):
                 _topics.setdefault(int(tid), Topic(int(tid), state="unknown"))
-        if self.draft_mode:
-            asyncio.create_task(self._draft_loop())
         while True:
             try:
                 await self.tick()
@@ -394,35 +397,27 @@ class Monitor:
                 _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
-        if self.draft_mode:
-            if force:  # 工具动作：立刻刷新草稿（节流由 _draft 处理）
-                await self._draft(topic, now)
+        if self.private_mode:
+            await self._heartbeat(topic, now)
             return
         async with topic.lock:
             await self._update_card(topic, now, force)
 
-    async def _draft_loop(self):
-        """私聊模式：每 DRAFT_EVERY 秒刷新所有运行中话题的草稿；活跃话题多时自动放慢。"""
-        while True:
-            active = [t for t in _topics.values() if t.turn_started and t.state != "idle"]
-            for topic in active:
-                await self._draft(topic, time.time())
-            await asyncio.sleep(max(DRAFT_EVERY, 1.2 * len(active)))
-
-    async def _draft(self, topic: Topic, now: float):
+    async def _heartbeat(self, topic: Topic, now: float):
+        """私聊模式：运行中长时间没有工具动作（如长时间思考），冒一条会消散的心跳，免得看起来像卡死。"""
         if not topic.turn_started or topic.state == "idle" or time.time() < self.paused_until:
             return
-        if now - topic.card_updated < 1.0:  # 两次草稿至少间隔 1 秒
+        last = max(topic.card_updated, _last_tool.get(topic.topic_id, [(None, 0.0)])[-1][1], topic.turn_started)
+        if now - last < HEARTBEAT:
             return
         topic.frame += 1
         topic.card_updated = now
-        try:
-            await self.bot.send_message_draft(chat_id=self.chat_id, draft_id=draft_id(topic.topic_id),
-                                              message_thread_id=topic.topic_id, text=card_text(topic, now, live=True),
-                                              parse_mode="HTML", api_kwargs={"can_stop": True})
-        except Exception as exc:
-            log.warning("[liveness] 草稿刷新失败 topic=%s: %s", topic.topic_id, exc)
-            self._note_error(exc)
+        snap = topic.snapshot
+        facts = " · ".join(x for x in (human_elapsed(now - topic.turn_started),
+                                        f"{snap.tokens} tokens" if snap.tokens else "") if x)
+        from src.renderer import send_ephemeral
+        await send_ephemeral(self.bot, self.chat_id, f"{SPINNER[topic.frame % len(SPINNER)]} 仍在运行 · {facts}",
+                             ttl=6.0, message_thread_id=topic.topic_id, parse_mode=None)
 
     async def _update_card(self, topic: Topic, now: float, force: bool):
         if not topic.turn_started or (not force and now - topic.turn_started < CARD_AFTER):
@@ -531,7 +526,7 @@ def topic_for_stopped_draft(payload: dict) -> int | None:
     if thread:
         return int(thread)
     wanted = payload.get("draft_id")
-    return next((tid for tid in _topics if draft_id(tid) == wanted), None)
+    return wanted // 1000 if isinstance(wanted, int) and wanted >= 1000 else None
 
 
 def note_abort(topic_id: int) -> int | None:

@@ -172,30 +172,30 @@ class MonitorTests(unittest.TestCase):
                 await self.mon.run()
 
 
-class DraftModeTests(unittest.TestCase):
-    """私聊 Thread 模式：状态用草稿气泡，不发状态卡消息；带原生停止按钮。"""
-    def test_tool_events_refresh_draft_not_card(self):
-        bot = FakeBot(); bot.drafts = []
-        async def send_message_draft(**kw):
-            bot.drafts.append(kw)
-        bot.send_message_draft = send_message_draft
+class PrivateModeTests(unittest.TestCase):
+    """私聊 Thread 模式：工具调用照旧单独发、几秒后消散；长时间无动作冒心跳；不发状态卡。"""
+    def test_tools_go_ephemeral_and_heartbeat_only_when_quiet(self):
+        bot = FakeBot()
+        sent = []
+        async def fake_ephemeral(_bot, chat_id, text, ttl=5.0, message_thread_id=None, parse_mode="HTML"):
+            sent.append((message_thread_id, text))
         async def scenario():
             with patch.dict(liveness._topics, {}, clear=True), patch.dict(liveness._last_tool, {}, clear=True), \
-                 patch.object(liveness, "_monitor", None):
+                 patch.object(liveness, "_monitor", None), patch("src.renderer.send_ephemeral", fake_ephemeral):
                 mon = liveness.Monitor(bot, 42)                    # 正数 = 私聊
-                self.assertTrue(mon.draft_mode)
-                await liveness.on_tool(7, "⚡ <code>ls</code>")
+                handled = await liveness.on_tool(7, "⚡ <code>ls</code>")
                 topic = liveness._topics[7]
-                topic.card_updated -= 2                            # 越过 1 秒节流
-                await liveness.on_tool(7, "⚡ <code>git status</code>")
-                return topic
-        topic = asyncio.run(scenario())
-        self.assertEqual(bot.sent, [])                             # 没有状态卡消息
-        self.assertEqual(len(bot.drafts), 2)
-        self.assertEqual(bot.drafts[-1]["draft_id"], 7)
-        self.assertEqual(bot.drafts[-1]["message_thread_id"], 7)
-        self.assertTrue(bot.drafts[-1]["api_kwargs"]["can_stop"])
-        self.assertIn("<code>git status</code>", bot.drafts[-1]["text"])
+                start = topic.turn_started
+                await mon.observe(7, snap(tokens="↓ 1k"), 0, start + 30)   # 30 秒：不打扰
+                quiet = list(sent)
+                await mon.observe(7, snap(tokens="↓ 2k"), 0, start + 70)   # 70 秒无动作：心跳
+                return handled, quiet
+        handled, quiet = asyncio.run(scenario())
+        self.assertFalse(handled)                                   # 调用方照旧发消散消息
+        self.assertEqual(quiet, [])
+        self.assertEqual(len(sent), 1)
+        self.assertIn("仍在运行", sent[0][1])
+        self.assertEqual(bot.sent, [])                              # 没有状态卡
 
     def test_live_elapsed_ticks_with_own_clock(self):
         topic = liveness.Topic(7, state="running", turn_started=1000.0)
@@ -205,8 +205,7 @@ class DraftModeTests(unittest.TestCase):
 
     def test_stopped_draft_maps_to_topic(self):
         self.assertEqual(liveness.topic_for_stopped_draft({"message_thread_id": 4705, "draft_id": 4705}), 4705)
-        with patch.dict(liveness._topics, {4704: liveness.Topic(4704)}, clear=True):
-            self.assertEqual(liveness.topic_for_stopped_draft({"draft_id": 4704}), 4704)
+        self.assertEqual(liveness.topic_for_stopped_draft({"draft_id": liveness.draft_id(4704, 37)}), 4704)
 
 
 class ReactionTests(unittest.TestCase):
