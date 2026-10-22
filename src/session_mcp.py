@@ -116,5 +116,37 @@ get_session_feedback with the request_id for the receipt instead of resending.
     return await call('POST', '/' + quote(session_id, safe='') + '/messages',
                       {'text': text, 'request_id': request_id, 'source_session_id': source, 'urgent': True})
 
+BROWSER = BASE.rsplit('/agent/sessions', 1)[0] + '/browser'
+
+
+@mcp.tool()
+async def request_browser_help(reason: str) -> dict:
+    """Ask the user to take over YOUR shared browser (browser MCP) via a TG button.
+
+Use when a page needs a human: login/SSO, 2FA, CAPTCHA, consent, or anything you
+must not do yourself (never ask the user to send passwords in chat). First open
+the page with the browser tools, then call this with a one-sentence Chinese
+reason, e.g. "请登录 SPACE（SSO），登录完成后我继续查询发布记录".
+
+The user gets [🖥 打开浏览器][✅ 我弄好了] in this session's Thread and controls
+the same browser through noVNC. While they operate, your browser calls are
+paused. When they click done (or after the timeout) you receive a message; you
+can also poll browser_help_status(help_id). Then take a fresh snapshot and go on.
+Login state is shared by all sessions, so other sessions benefit too.
+"""
+    sessions = (await call('GET'))['sessions']
+    source = source_session(sessions, caller_processes())
+    async with httpx.AsyncClient(timeout=90, trust_env=False) as client:
+        response = await client.post(BROWSER + '/help', json={'source_session_id': source, 'reason': reason})
+        return response.json()
+
+
+@mcp.tool()
+async def browser_help_status(help_id: str) -> dict:
+    """Check a request_browser_help: waiting / done / timeout / failed."""
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        return (await client.get(BROWSER + '/help/' + quote(help_id, safe=''))).json()
+
+
 if __name__ == '__main__':
     mcp.run(transport='stdio')

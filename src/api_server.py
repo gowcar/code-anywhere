@@ -1257,6 +1257,8 @@ def create_api_app() -> web.Application:
     app.router.add_get("/agent/sessions/{id}", agent_sessions.handle_status)
     app.router.add_get("/agent/sessions/{id}/feedback", agent_sessions.handle_feedback)
     app.router.add_post("/agent/sessions/{id}/messages", agent_sessions.handle_send)
+    from src import browser_pool
+    browser_pool.add_routes(app)
     # Hook callbacks
     app.router.add_post("/session_start", handle_session_start)
     app.router.add_post("/session_stop", handle_session_stop)

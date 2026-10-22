@@ -1,0 +1,59 @@
+"""共享浏览器池：租用互斥、归还、接管前置条件、中转机脚本保存与恢复原服务。"""
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from src import browser_pool as pool
+
+
+class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        pool._leases.clear()
+        pool._help.clear()
+        self.patches = [patch.object(pool, "start_slot", AsyncMock()),
+                        patch.object(pool, "_version", AsyncMock(return_value=None)),
+                        patch.object(pool, "export_cookies", AsyncMock()),
+                        patch.object(pool, "_owner", AsyncMock(side_effect=lambda c: {"project": f"p{c}", "session_id": f"claude:%1:{c.replace('-', ':')}"})),
+                        patch.object(pool, "RELEASE_GRACE", 0)]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def test_each_client_gets_its_own_slot_and_third_waits(self):
+        a = await pool.acquire("1-1")
+        self.assertEqual(await pool.acquire("1-1"), a)   # 同一会话重连沿用原槽位
+        b = await pool.acquire("2-2")
+        self.assertNotEqual(a, b)
+        with self.assertRaisesRegex(RuntimeError, "都在使用中"):
+            await pool.acquire("3-3")
+
+    async def test_disconnected_lease_is_released(self):
+        slot = await pool.acquire("1-1")
+        pool._schedule_release(slot, "1-1")
+        await pool._leases[slot]["release_task"]
+        self.assertNotIn(slot, pool._leases)
+        pool.export_cookies.assert_awaited_with(slot)
+
+    async def test_lease_kept_while_user_is_operating(self):
+        slot = await pool.acquire("1-1")
+        pool._help["h"] = {"slot": slot, "status": "waiting"}
+        pool._schedule_release(slot, "1-1")
+        await pool._leases[slot]["release_task"]
+        self.assertIn(slot, pool._leases)
+
+    async def test_help_needs_a_lease(self):
+        with patch.object(pool, "help_available", return_value=True):
+            result = await pool.request_help("claude:%9:5:5", "请登录")
+        self.assertEqual(result["status"], "not_leased")
+
+    def test_relay_script_saves_and_restores_existing_service(self):
+        with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"):
+            start, stop = pool._relay_script("start"), pool._relay_script("stop")
+        self.assertIn("-iTCP@10.0.1.188:6801", start)
+        self.assertIn("saved.cmd", start)
+        self.assertIn("ws/run --ssl-only 10.0.1.188:6801 127.0.0.1:16801", start)
+        self.assertIn("saved.cmd", stop)
+        self.assertIn("restored", stop)
+
+
+if __name__ == "__main__":
+    unittest.main()

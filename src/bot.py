@@ -629,6 +629,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _issues_callback(query, context, data)
         return
 
+    if data.startswith("bh:"):  # 共享浏览器人工接管：我弄好了
+        from src import browser_pool
+        await query.answer("好的，通知会话继续")
+        await browser_pool.finish_help(data.split(":", 2)[2], "done")
+        return
+
     if data.startswith("lv:"):  # 状态告警按钮：看终端 / 中断
         _, action, topic = data.split(":", 2)
         cwd = projects.get_path(int(topic))
@@ -1882,6 +1888,8 @@ def create_app() -> Application:
         if config.CHAT_ID:
             from src import liveness
             asyncio.create_task(liveness.Monitor(application.bot, config.CHAT_ID).run())
+        from src import browser_pool
+        asyncio.create_task(browser_pool.monitor())
     app.post_init = post_init
 
     app.add_handler(CommandHandler("model", cmd_model))
