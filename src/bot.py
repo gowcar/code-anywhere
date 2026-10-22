@@ -1420,7 +1420,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
         mark_tg_reply_target(topic_id, message.message_id)
     start_typing(context.bot, chat_id, session_key)
     await _inject_tmux(target_pane, text)
-    if not is_private and topic_id:  # 👀：已送进会话；这一轮结束时 liveness 改成 👌
+    # 👀：已送进会话；这一轮结束时 liveness 改成 👌。只在群组模式：私聊里 bot 的表情回应会触发
+    # 客户端的“新回应”提示（💟 角标），用户要求私聊关闭（2026-10-22）
+    if not is_private and topic_id and not _private_thread_mode():
         from src import liveness
         liveness.note_user_message(topic_id, message.message_id)
         asyncio.create_task(liveness.react(context.bot, chat_id, message.message_id, "👀"))

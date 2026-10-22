@@ -57,6 +57,26 @@ class RoutingTests(unittest.TestCase):
             handler.assert_awaited_once()
             inject.assert_not_awaited()
 
+    def test_no_reactions_in_private_thread_mode(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        msg = SimpleNamespace(message_thread_id=4707, chat_id=42, chat=SimpleNamespace(type="private"), text="hi",
+                              caption=None, photo=None, document=None, video=None, video_note=None, audio=None,
+                              voice=None, sticker=None, reply_to_message=None, reply_text=AsyncMock(), message_id=9,
+                              media_group_id=None)
+        upd = SimpleNamespace(effective_user=SimpleNamespace(id=1), message=msg, effective_message=msg)
+        with patch.object(bot.config, "CHAT_ID", 42), patch.object(bot, "auth_check", return_value=True), \
+             patch.object(bot.projects, "get_path", return_value="/w/desk"), \
+             patch.object(bot.backends, "get_backend", return_value="codex"), \
+             patch.object(bot.backends, "codex_transcript", AsyncMock(return_value=("sid", "/p"))), \
+             patch.object(bot, "_find_pane_for_project", AsyncMock(return_value="%1")), \
+             patch("src.api_server.register_pane_watcher", AsyncMock(return_value=True)), \
+             patch.object(bot, "start_typing"), patch.object(bot, "_inject_tmux", AsyncMock()) as inject, \
+             patch("src.liveness.react", AsyncMock()) as react:
+            asyncio.run(bot._handle_message(upd, SimpleNamespace(bot=None)))
+        inject.assert_awaited_once()
+        react.assert_not_called()
+
     def test_private_thread_routes_by_thread(self):
         with patch.object(bot.config, "CHAT_ID", -100), patch.object(bot.projects, "get_path", side_effect=lambda t: {7: "/w/ios"}.get(t)), \
              patch.object(bot.state, "get_cwd", return_value="/w/legacy"):
