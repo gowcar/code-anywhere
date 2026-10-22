@@ -1351,9 +1351,48 @@ def _is_user_receipt(event: dict, snippet: str, public_text) -> bool:
     return role == "user" and snippet in (body or "")
 
 
-async def _confirm_delivery(message, pane: str, cwd: str, text: str, path: str, offset: int):
+def _composer_text(screen: str) -> str:
+    """终端输入框里的文字。Claude 的输入框夹在最后两条横线之间；屏幕上方的历史消息不算
+    （否则已发出的消息出现在历史里，也会被误报“停在输入框”）。没有横线时（Codex）取最后几行。"""
+    lines = screen.rstrip().splitlines()
+    rules = [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) <= set("─━")]
+    if len(rules) >= 2:
+        return "\n".join(lines[rules[-2] + 1:rules[-1]])
+    return "\n".join(lines[-6:])
+
+
+async def _rebind_claude(pane: str, cwd: str, transcript: str, reason: str,
+                         start_offsets: dict[str, int] | None = None) -> None:
+    """桥接看的不是这个终端当前的会话日志（/clear 或新会话时 hook 通知没送到）：改看新日志。
+    start_offsets 给出时从投递前的位置开始转发，这条消息的回复不会漏。"""
+    from src.api_server import register_pane_watcher
+    log.warning("[rebind] pane=%s 改看 %s（%s）", pane, Path(transcript).name, reason)
+    try:
+        await backends.remember_claude(pane, {"session_id": Path(transcript).stem, "cwd": cwd,
+                                              "transcript_path": transcript})
+        await register_pane_watcher(pane, cwd, start_offsets=start_offsets)
+    except Exception:
+        log.warning("[rebind] 失败 pane=%s", pane, exc_info=True)
+
+
+async def _sync_claude_session(pane: str, cwd: str) -> None:
+    """投递前核对：hook 把当前会话记在 pane 标签上；和桥接登记的不一致，说明换会话的通知没送到。"""
+    from src.api_server import terminal_sessions
+    bound = next((sid for sid, v in terminal_sessions.items()
+                  if v.get("tmux_pane") == pane and v.get("backend", "claude") == "claude"), None)
+    if not bound:
+        return
+    info = await backends.claude_session(pane, cwd)
+    if info and info["session_id"] != bound:
+        await _rebind_claude(pane, cwd, info["transcript_path"], f"pane 标签是 {info['session_id'][:8]}，登记的是 {bound[:8]}")
+
+
+async def _confirm_delivery(message, pane: str, cwd: str, text: str, path: str, offset: int,
+                            others: dict[str, int] | None = None):
     """确认会话日志里出现了用户原文。Codex 开着 Goal 时曾把用户消息替换成 Goal 续跑指令（2026-10-22），
-    这类“消息悄悄丢了”必须让用户知道。"""
+    这类“消息悄悄丢了”必须让用户知道。
+    others：投递前同项目其他 Claude 日志的大小。原文出现在其中某个里，说明会话已经换了（/clear 后
+    hook 通知没送到，2026-10-22 曾因此误报“没发出去”且回复不转发），改看那个日志，不报警。"""
     from src import liveness
     from src.agent_sessions import public_text, tail_events
     snippet = receipt_snippet(text)
@@ -1370,18 +1409,39 @@ async def _confirm_delivery(message, pane: str, cwd: str, text: str, path: str, 
         try:
             if any(_is_user_receipt(event, snippet, public_text) for event in tail_events(path, offset, limit=4 << 20)):
                 return
+            for other in _grown_logs(path, others):
+                if any(_is_user_receipt(event, snippet, public_text)
+                       for event in tail_events(other, others.get(other, 0), limit=4 << 20)):
+                    await _rebind_claude(pane, cwd, other, "签收时在这个日志里找到用户原文", start_offsets=others)
+                    return
         except Exception:
             return
     screen = await _capture_pane(pane)
     if busy and snippet in screen:  # 还在队列里排着：没丢，只是这一轮还没做完
         return
-    where = "停在终端输入框里没有发出去" if snippet in screen else "没有进入会话"
+    where = "停在终端输入框里没有发出去" if snippet in _composer_text(screen) else "没有进入会话"
     log.warning("[receipt] 消息未被会话签收 pane=%s where=%s snippet=%s", pane, where, snippet)
     try:
         await message.reply_text(f"⚠️ 这条消息{where}，会话没收到。请重发；如果一直这样，可以 /screen 看看终端状态。\n\n原文：{text[:500]}",
                                  parse_mode=None)
     except Exception:
         pass
+
+
+def _grown_logs(path: str, others: dict[str, int] | None) -> list[str]:
+    """同项目里投递后有新内容的其他日志（含投递后才新建的）。"""
+    if not others:
+        return []
+    folder = Path(path).parent
+    found = []
+    for candidate in folder.glob("*.jsonl"):
+        key = str(candidate.resolve())
+        try:
+            if key != str(Path(path).resolve()) and candidate.stat().st_size > others.get(key, 0):
+                found.append(key)
+        except FileNotFoundError:
+            continue
+    return found
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, album_messages=None):
@@ -1524,6 +1584,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
     claude_start_offsets = None
     if backends.get_backend(cwd) == "claude":
         from src.api_server import terminal_sessions
+        await _sync_claude_session(target_pane, cwd)
         if not any(v.get("tmux_pane") == target_pane for v in terminal_sessions.values()):
             claude_start_offsets = backends.claude_transcript_offsets(cwd)
 
@@ -1539,9 +1600,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
             mark_tg_reply_target(topic_id, message.message_id)
     start_typing(context.bot, chat_id, session_key)
     receipt_from = await _transcript_position(target_pane, cwd)
+    other_logs = backends.claude_transcript_offsets(cwd) if backends.get_backend(cwd) == "claude" else None
     await _inject_tmux(target_pane, text)
     if receipt_from:  # 后台确认会话真的收到了这条消息，丢了就提醒（不阻塞后续投递）
-        asyncio.create_task(_confirm_delivery(message, target_pane, cwd, text, *receipt_from))
+        asyncio.create_task(_confirm_delivery(message, target_pane, cwd, text, *receipt_from, others=other_logs))
     # 👀：已送进会话；这一轮结束时 liveness 改成 👌。只在群组模式：私聊里 bot 的表情回应会触发
     # 客户端的“新回应”提示（💟 角标），用户要求私聊关闭（2026-10-22）
     if not is_private and topic_id and not _private_thread_mode():
