@@ -45,6 +45,18 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
             result = await pool.request_help("claude:%9:5:5", "请登录")
         self.assertEqual(result["status"], "not_leased")
 
+    async def test_new_tab_refused_at_limit(self):
+        create = '{"id": 7, "method": "Target.createTarget", "params": {"url": "about:blank"}}'
+        with patch.object(pool, "_pages", AsyncMock(return_value=pool.MAX_TABS)):
+            refusal = await pool._tab_limit_refusal(1, create)
+            self.assertIn("最多", refusal)
+            self.assertIsNone(await pool._tab_limit_refusal(1, '{"id": 8, "method": "Page.navigate"}'))
+        with patch.object(pool, "_pages", AsyncMock(return_value=1)):
+            self.assertIsNone(await pool._tab_limit_refusal(1, create))
+
+    def test_slot_count_has_hard_cap(self):
+        self.assertLessEqual(pool.SLOTS, pool.MAX_SLOTS)
+
     def test_relay_script_saves_and_restores_existing_service(self):
         with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"):
             start, stop = pool._relay_script("start"), pool._relay_script("stop")

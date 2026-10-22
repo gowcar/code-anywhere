@@ -24,7 +24,9 @@ from aiohttp import web
 
 log = logging.getLogger("code-anywhere.browser")
 
-SLOTS = int(os.getenv("BROWSER_POOL_SLOTS", "2"))
+MAX_SLOTS = 4                                                   # 数量硬上限（用户要求不能开太多），配置再大也不超过
+SLOTS = max(1, min(int(os.getenv("BROWSER_POOL_SLOTS", "2")), MAX_SLOTS))
+MAX_TABS = int(os.getenv("BROWSER_POOL_MAX_TABS", "6"))         # 每个槽位最多这么多标签页
 BASE = Path(os.getenv("BROWSER_POOL_DIR", str(Path.home() / ".local/share/code-anywhere/browser")))
 COOKIES = BASE / "cookies.json"
 SCREEN = os.getenv("BROWSER_POOL_SCREEN", "1280x800")
@@ -287,6 +289,32 @@ async def monitor() -> None:
 
 # ---------- CDP 中转（Playwright MCP 连这里） ----------
 
+async def _pages(slot: int) -> int:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2), trust_env=False) as http:
+            async with http.get(f"http://127.0.0.1:{cdp_port(slot)}/json/list") as resp:
+                return sum(t.get("type") == "page" for t in await resp.json(content_type=None))
+    except Exception:
+        return 0
+
+
+async def _tab_limit_refusal(slot: int, raw: str) -> str | None:
+    """新开标签页前检查数量，超过上限直接回错误，不转给浏览器。"""
+    if '"Target.createTarget"' not in raw:
+        return None
+    try:
+        message = json.loads(raw)
+    except ValueError:
+        return None
+    if message.get("method") != "Target.createTarget" or await _pages(slot) < MAX_TABS:
+        return None
+    reply = {"id": message.get("id"), "error": {"code": -32000, "message":
+             f"共享浏览器每个槽位最多 {MAX_TABS} 个标签页，请先关闭不用的标签页（browser_tabs 的 close）再打开新页面"}}
+    if message.get("sessionId"):
+        reply["sessionId"] = message["sessionId"]
+    return json.dumps(reply, ensure_ascii=False)
+
+
 async def handle_version(request: web.Request) -> web.Response:
     client = request.match_info["client"]
     try:
@@ -318,6 +346,10 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                     async for msg in downstream:
                         if msg.type != aiohttp.WSMsgType.TEXT:
                             break
+                        refusal = await _tab_limit_refusal(slot, msg.data)
+                        if refusal:
+                            await downstream.send_str(refusal)
+                            continue
                         await gate(slot).wait()   # 人工接管期间暂停模型操作
                         _last_used[slot] = time.time()
                         await upstream.send_str(msg.data)
