@@ -36,7 +36,7 @@ NAMES_FILE = PROJECT_ROOT / ".topic-names.json"
 CARDS_FILE = PROJECT_ROOT / ".liveness-cards.json"  # 当前卡片编号：重启后据此清掉旧卡，保证每个话题只有一张
 
 EMOJI = {"running": "🟢", "waiting": "🟡", "retrying": "🔴", "stalled": "🔴", "idle": ""}
-_KNOWN_PREFIX = re.compile(r"^(?:🟢|🟡|🔴|🟠|⚪)\s*")
+_KNOWN_PREFIX = re.compile(r"^(?:🟢|🟡|🔴|🟠|⚪)\s*|\s*(?:🟢|🟡|🔴|🟠|⚪)$")
 
 
 # ---------------------------------------------------------------- 屏幕解析（纯函数）
@@ -106,9 +106,16 @@ def base_title(name: str) -> str:
     return _KNOWN_PREFIX.sub("", name).strip()
 
 
+TITLE_MAX = 22  # 带状态灯时名字的最大长度；客户端从末尾截断，太长灯就看不到了
+
+
 def titled(base: str, state: str) -> str:
+    """状态灯放在名字末尾：放开头会被 Telegram 拿去当 Thread 图标，出现一大一小两个灯、还挡住字母图标。"""
     emoji = EMOJI.get(state, "")
-    return f"{emoji} {base}" if emoji else base
+    if not emoji:
+        return base
+    name = base if len(base) <= TITLE_MAX else base[:TITLE_MAX // 2] + "…" + base[-(TITLE_MAX // 2 - 1):]
+    return f"{name} {emoji}"
 
 
 def human_elapsed(seconds: float) -> str:

@@ -31,7 +31,10 @@ class FakeBot:
         self.deleted.append(kw["message_id"])
 
     async def edit_forum_topic(self, **kw):
-        self.renamed.append(kw["name"])
+        if "name" in kw:
+            self.renamed.append(kw["name"])
+        else:
+            self.icons = getattr(self, "icons", []) + [(kw["message_thread_id"], kw["icon_custom_emoji_id"])]
 
 
 class MonitorTests(unittest.TestCase):
@@ -131,19 +134,19 @@ class MonitorTests(unittest.TestCase):
         self.at(10, snap(tokens="↓ 2k"))
         self.assertEqual(self.bot.renamed, [])                     # 稳定不足 20 秒
         self.at(20, snap(tokens="↓ 3k"))
-        self.assertEqual(self.bot.renamed, ["🟢 demo"])
+        self.assertEqual(self.bot.renamed, ["demo 🟢"])
         self.at(30, snap(state="idle", tokens=""))
         self.at(55, snap(state="idle", tokens=""))
-        self.assertEqual(self.bot.renamed, ["🟢 demo"])            # 距上次改名不足 60 秒
+        self.assertEqual(self.bot.renamed, ["demo 🟢"])            # 距上次改名不足 60 秒
         self.at(85, snap(state="idle", tokens=""))
-        self.assertEqual(self.bot.renamed, ["🟢 demo", "demo"])
+        self.assertEqual(self.bot.renamed, ["demo 🟢", "demo"])
 
     def test_title_not_starved_by_card_budget(self):
         for _ in range(liveness.BUDGET):
             self.mon._spend()                                       # 卡片把额度用完了
         self.at(0, snap())
         self.at(25, snap(tokens="↓ 2k"))
-        self.assertEqual(self.bot.renamed, ["🟢 demo"])
+        self.assertEqual(self.bot.renamed, ["demo 🟢"])
 
     def test_leftover_cards_deleted_on_start_and_only_one_card_per_topic(self):
         liveness.CARDS_FILE.write_text('{"7": 55, "9": 66}')       # 上次运行留下的卡
@@ -159,7 +162,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.bot.renamed, [])
 
     def test_restart_restores_leftover_prefix(self):
-        liveness._load_names()["7"]["applied"] = "🟢 demo"        # 重启前挂着 🟢
+        liveness._load_names()["7"]["applied"] = "demo 🟢"        # 重启前挂着 🟢
         asyncio.run(self._run_one_tick())
         self.at(30, liveness.Snapshot())                           # 首次采样：状态判为空闲
         self.assertEqual(self.bot.renamed, [])
@@ -257,8 +260,11 @@ class FloodTests(unittest.TestCase):
 class TextTests(unittest.TestCase):
     def test_base_title_strips_status_prefix(self):
         self.assertEqual(liveness.base_title("🟢 digital-buddy-ios"), "digital-buddy-ios")
+        self.assertEqual(liveness.base_title("digital-buddy-ios 🟢"), "digital-buddy-ios")
         self.assertEqual(liveness.titled("demo", "idle"), "demo")
-        self.assertEqual(liveness.titled("demo", "stalled"), "🔴 demo")
+        self.assertEqual(liveness.titled("demo", "stalled"), "demo 🔴")
+        long_title = liveness.titled("digital-buddy-seatalk-live-current", "running")
+        self.assertTrue(long_title.endswith(" 🟢") and len(long_title) <= liveness.TITLE_MAX + 2)
 
     def test_tool_note_is_plain_text(self):
         with patch.dict(liveness._last_tool, {}, clear=True):
