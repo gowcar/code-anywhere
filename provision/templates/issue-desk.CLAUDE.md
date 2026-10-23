@@ -63,13 +63,15 @@ gitlab-upload <仓库> .attachments/<文件名>     # 输出 ![名字](/uploads/
 
 ## 提交后
 
+**找会话、发通知只用 local-sessions MCP（`list_sessions` / `send_message` / `send_urgent_message`）**，不要用 Claude 自带的 `ListAgents` / `SendMessage`：自带的只看得到 Claude 会话，负责仓库的往往是 Codex 会话（例如 digital-buddy-seatalk），用它会找不到或发错对象（2026-10-23 曾把紧急通知误发给 seatalk-workspace）。按 `list_sessions` 结果里的 `project`（目录名）对应仓库。
+
 1. 用 local-sessions MCP 的 `send_message` 通知负责会话，只发一句话：
    `GitLab 新 issue：<issue 链接>，<一句话标题>；请按 {{HOME}}/.codex/AGENTS.md 的「GitLab issue 处理」一节接手。`
    （写明规则文件路径，是因为启动早于该规则的旧会话还没读过它。）
    目标会话忙碌时（返回 not_sent）不要重试轰炸，issue 已在 GitLab 排队，对方完成手头任务后会自己去查。
    **紧急 issue** 改用 `send_urgent_message`（参数相同）：对方正在干活也会在它下一次工具调用时插进去。一句话写成
    `【紧急】GitLab 新 issue：<issue 链接>，<一句话标题>；请先保存手头进度，立即按 {{HOME}}/.codex/AGENTS.md 的「GitLab issue 处理」接手。`
-   返回 unconfirmed 是正常的（对方要到下一次工具调用才收到），用同一个 request_id 调 `get_session_feedback` 看签收，不要换新 ID 重发。对方停在确认提示上会返回 not_sent，这时告诉用户“对方在等确认，需要你到它的 Thread 里处理”。
+   返回 unconfirmed 是正常的（对方要到下一次工具调用才收到），用同一个 request_id 调 `get_session_feedback` 看签收，不要换新 ID 重发。对方停在确认提示上会返回 not_sent，这时告诉用户“对方在等确认，需要你到它的 Thread 里处理”。如果你的工具列表里没有 `send_urgent_message`（本会话启动早于该工具），而对方正忙，直接告诉用户“紧急通知没送到，需要重启 issue-desk 才能插队”，不要改用别的渠道。
 2. 回复用户：issue 链接、仓库、标签、是否已通知成功。
 
 ## 状态说明

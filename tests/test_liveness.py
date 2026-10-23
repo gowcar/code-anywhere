@@ -290,9 +290,8 @@ class TextTests(unittest.TestCase):
         self.assertEqual(liveness.base_title("digital-buddy-ios 🟢"), "digital-buddy-ios")
         self.assertEqual(liveness.titled("demo", "idle"), "demo")
         self.assertEqual(liveness.titled("demo", "stalled"), "demo 🔴")
-        long_title = liveness.titled("digital-buddy-seatalk-live-current", "running")
-        self.assertTrue(long_title.endswith(" 🟢") and len(long_title) <= liveness.TITLE_MAX + 2)
-        self.assertEqual(liveness.titled("digital-buddy-seatalk", "running"), "digital-b…-seatalk 🟢")
+        # 名字不缩写，只在末尾加灯
+        self.assertEqual(liveness.titled("digital-buddy-seatalk", "running"), "digital-buddy-seatalk 🟢")
 
     def test_tool_note_keeps_rendered_html_single_line(self):
         # 卡片以 HTML 发送，命令要留在 <code> 里（否则路径会被识别成 bot 命令）；只去掉换行

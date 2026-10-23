@@ -30,7 +30,6 @@ BUDGET = 15          # 状态卡每分钟最多占用的 TG 调用次数；撞�
 SPINNER = "◐◓◑◒"
 PRIVATE_MOVE_EVERY = 2   # 私聊模式额度宽松：卡片下面一出现新消息，最多 2 秒就挪回最底部
 PRIVATE_CARD_EVERY = 8   # 私聊模式：没有工具动作时卡片的刷新间隔
-TITLE_MAX = 18       # 带状态灯时名字的最大长度；列表右侧还要放时间和未读数，客户端从末尾截断，太长灯就看不到
 STALL = 300          # 运行中无进展超过这么久判为疑似卡住
 TITLE_STABLE = 20    # 状态稳定这么久才改话题名
 TITLE_GAP = 60       # 同一话题两次改名的最小间隔
@@ -140,8 +139,8 @@ def titled(base: str, state: str) -> str:
     emoji = EMOJI.get(state, "")
     if not emoji:
         return base
-    name = base if len(base) <= TITLE_MAX else base[:TITLE_MAX // 2] + "…" + base[-(TITLE_MAX // 2 - 1):]
-    return f"{name} {emoji}"
+    # 名字原样保留、不缩写（2026-10-23 用户：不能乱改名，名字过长由用户自己控制，点进去标题栏能看到灯）
+    return f"{base} {emoji}"
 
 
 def human_elapsed(seconds: float) -> str:
