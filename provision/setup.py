@@ -646,7 +646,7 @@ def step_service():
 
 
 def step_verify():
-    """最终自检：服务健康 + 往群里发一条上线消息"""
+    """最终自检：服务健康 + 往 Telegram 发一条上线消息"""
     env = read_env(ENV_FILE)
     port = env.get("BOT_PORT", "5000")
     for _ in range(30):
