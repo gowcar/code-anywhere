@@ -21,6 +21,8 @@ def main() -> None:
     client = "-".join(callers[0]) if callers else f"anon-{os.getppid()}"
     output = Path.home() / ".local/share/code-anywhere/browser/output" / client
     output.mkdir(parents=True, exist_ok=True)
+    for folder in (output.parent.parent, output.parent):  # 里面有共享登录身份，只给本账号
+        folder.chmod(0o700)
     node = os.getenv("NODE", "node")
     os.execvp(node, [node, str(cli), "--cdp-endpoint", f"http://127.0.0.1:{PORT}/browser/cdp/{client}",
                      "--caps", "vision,pdf,devtools", "--idle-timeout", "600000",
