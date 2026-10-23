@@ -39,7 +39,7 @@ class EnvTests(unittest.TestCase):
 
 
 class GroupMessageTests(unittest.TestCase):
-    def test_picks_latest_human_group_message(self):
+    def test_picks_latest_human_message(self):
         updates = [
             {"update_id": 1, "message": {"chat": {"id": 5, "type": "private"}, "from": {"id": 9}}},
             {"update_id": 2, "message": {"chat": {"id": -100, "type": "supergroup", "title": "G", "is_forum": True},
@@ -47,10 +47,19 @@ class GroupMessageTests(unittest.TestCase):
             {"update_id": 3, "message": {"chat": {"id": -100, "type": "supergroup"}, "from": {"id": 7, "is_bot": True}}},
         ]
         self.assertEqual(setup.find_group_message(updates),
-                         {"chat_id": -100, "title": "G", "is_forum": True, "user_id": 9, "user": "me"})
+                         {"chat_id": -100, "title": "G", "is_forum": True, "private": False, "user_id": 9, "user": "me"})
 
-    def test_none_without_group_message(self):
-        self.assertIsNone(setup.find_group_message([{"update_id": 1, "message": {"chat": {"type": "private"}}}]))
+    def test_private_message_selects_private_thread_mode(self):
+        found = setup.find_group_message([{"update_id": 1, "message": {"chat": {"id": 9, "type": "private"},
+                                                                       "from": {"id": 9, "username": "me"}}}])
+        self.assertEqual((found["chat_id"], found["private"], found["is_forum"]), (9, True, True))
+
+    def test_private_mode_requires_threaded_mode(self):
+        from unittest.mock import patch
+        with patch.object(setup, "tg", return_value={"has_topics_enabled": False}):
+            self.assertIn("Threaded Mode", setup.check_group("t", 9, 1)[0])
+        with patch.object(setup, "tg", return_value={"has_topics_enabled": True}):
+            self.assertEqual(setup.check_group("t", 9, 1), [])
 
 
 class RenderTests(unittest.TestCase):

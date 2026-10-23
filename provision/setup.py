@@ -119,14 +119,16 @@ def render(name: str, **values: str) -> str:
 
 
 def find_group_message(updates: list[dict]) -> dict | None:
-    """在 getUpdates 结果里找最近一条来自群组的人类消息。"""
+    """在 getUpdates 结果里找最近一条人类消息：私聊（默认的私聊 Thread 模式）或话题群组。"""
     for update in reversed(updates):
         message = update.get("message") or {}
         chat, user = message.get("chat") or {}, message.get("from") or {}
-        if chat.get("type") in {"group", "supergroup"} and not user.get("is_bot"):
-            return {"chat_id": chat["id"], "title": chat.get("title", ""),
-                    "is_forum": bool(chat.get("is_forum")), "user_id": user.get("id"),
-                    "user": user.get("username") or user.get("first_name", "")}
+        if user.get("is_bot") or chat.get("type") not in {"private", "group", "supergroup"} or "id" not in chat:
+            continue
+        private = chat["type"] == "private"
+        return {"chat_id": chat["id"], "title": "私聊" if private else chat.get("title", ""),
+                "is_forum": private or bool(chat.get("is_forum")), "private": private,
+                "user_id": user.get("id"), "user": user.get("username") or user.get("first_name", "")}
     return None
 
 
@@ -163,9 +165,16 @@ def tg(token: str, method: str, http_timeout: int = 20, **params) -> dict:
         raise TgError(exc.code, body.get("description", str(exc))) from None
 
 
+THREADED_MODE_HINT = "在 @BotFather 发 /mybots → 选你的 bot → Bot Settings → Threaded Mode → 打开"
+
+
 def check_group(token: str, chat_id: int, bot_id: int) -> list[str]:
-    """返回群组配置上缺的东西；空列表 = 就绪。"""
+    """返回入口配置上缺的东西；空列表 = 就绪。chat_id > 0 是私聊 Thread 模式（默认），否则是话题群组。"""
     missing = []
+    if chat_id > 0:
+        if not tg(token, "getMe").get("has_topics_enabled"):
+            missing.append(f"bot 还没开启 Threaded Mode（{THREADED_MODE_HINT}）")
+        return missing
     chat = tg(token, "getChat", chat_id=chat_id)
     if not chat.get("is_forum"):
         missing.append("群组没有开启「话题 / Topics」")
@@ -371,7 +380,7 @@ def write_env(updates: dict[str, str]):
 
 
 def step_telegram():
-    """Telegram bot 与话题群组"""
+    """Telegram bot 与入口（默认私聊 Thread 模式：每个项目是和 bot 私聊里的一个 Thread）"""
     env = read_env(ENV_FILE)
     token, chat_id = env.get("BOT_TOKEN", ""), env.get("CHAT_ID", "")
     if token and token != "your_bot_token_here":
@@ -380,11 +389,11 @@ def step_telegram():
             if chat_id:
                 missing = check_group(token, int(chat_id), me["id"])
                 if not missing:
-                    ok(f"@{me['username']} 已就绪，群组 {chat_id}")
+                    ok(f"@{me['username']} 已就绪，" + ("私聊 Thread 模式" if int(chat_id) > 0 else f"群组 {chat_id}"))
                     return
                 warn("；".join(missing))
             else:
-                warn("还没有绑定群组（CHAT_ID 为空）")
+                warn("还没有绑定入口（CHAT_ID 为空）")
         except TgError as exc:
             warn(f"BOT_TOKEN 无效或群组不可用：{exc}")
             token = ""
@@ -405,17 +414,16 @@ def step_telegram():
     else:
         me = tg(token, "getMe")
     ok(f"bot 有效：@{me['username']}")
-    info("接下来：")
-    info(f"  1) 新建一个 Telegram 群组，把 @{me['username']} 拉进去")
-    info("  2) 群设置里开启「话题 / Topics」")
-    info("  3) 把 bot 设为管理员，并勾选「管理话题」")
-    info("  4) 在群里随便发一句话（比如 hello）")
+    info("接下来（私聊 Thread 模式，推荐）：")
+    info(f"  1) {THREADED_MODE_HINT}")
+    info(f"  2) 打开和 @{me['username']} 的私聊，随便发一句话（比如 hello）")
+    info("  （也可以用话题群组：建群、开启话题、把 bot 设为管理员并勾选「管理话题」，再在群里发一句话）")
     try:
         tg(token, "deleteWebhook")
     except TgError:
         pass
     found, offset, deadline = None, None, time.time() + 900
-    print("    等待群消息（最多 15 分钟，Ctrl+C 中止）…")
+    print("    等待你的消息（最多 15 分钟，Ctrl+C 中止）…")
     while time.time() < deadline:
         try:
             updates = tg(token, "getUpdates", http_timeout=40, offset=offset or 0, timeout=30)
@@ -433,10 +441,10 @@ def step_telegram():
         if found:
             break
     if not found:
-        warn("超时：没收到群消息")
+        warn("超时：没收到你的消息")
         return
     tg(token, "getUpdates", offset=offset)  # 确认已读，服务启动后不再重复处理
-    ok(f"群组：{found['title']}（{found['chat_id']}），你的 TG 账号：{found['user']}（{found['user_id']}）")
+    ok(f"入口：{found['title']}（{found['chat_id']}），你的 TG 账号：{found['user']}（{found['user_id']}）")
     while missing := check_group(token, found["chat_id"], me["id"]):
         warn("；".join(missing))
         input("    改好后按回车重新检查…")
@@ -653,10 +661,12 @@ def step_verify():
         warn(f"服务健康检查失败（127.0.0.1:{port}/health），看 logs/code-anywhere.log")
         return
     ok(f"服务健康：{health.get('status')}，已接管 {health.get('terminal_sessions', 0)} 个会话")
-    if env.get("BOT_TOKEN") and env.get("CHAT_ID") and ask("往群里发一条上线消息验证链路？"):
+    if env.get("BOT_TOKEN") and env.get("CHAT_ID") and ask("往 Telegram 发一条上线消息验证链路？"):
         tg(env["BOT_TOKEN"], "sendMessage", chat_id=env["CHAT_ID"],
-           text=f"✅ code-anywhere 已在 {socket.gethostname()} 就绪。在 ~/workspace 下任一目录启动 claude/codex 说句话，5 分钟内会出现对应话题。")
-        ok("已发送，去群里看看")
+           text=f"✅ code-anywhere 已在 {socket.gethostname()} 就绪。\n\n"
+                f"发 /new code-anywhere 打开它自己的 Thread，之后想加什么能力（远程查看浏览器、GitLab issue 流程……）直接在那里跟它说。\n"
+                f"新项目：/new 项目名（默认 Claude，加 codex 用 Codex）。")
+        ok("已发送，去 Telegram 看看")
 
 
 STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": step_cli_auth,
