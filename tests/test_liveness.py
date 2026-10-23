@@ -101,6 +101,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(tool_card_line("Bash", {"command": "cd /x; ls", "description": "List files"}), "⚡ List files")
         self.assertEqual(tool_card_line("Bash", {"command": "cd /home/toc/SSE/workspace/code-anywhere; git status -s"}),
                          "⚡ <code>git status -s</code>")
+        self.assertEqual(tool_card_line("Bash", {"command": "sleep 3; cd /a/b && export X=1; grep -n x f"}),
+                         "⚡ <code>grep -n x f</code>")
         self.assertEqual(tool_card_line("Read", {"file_path": "/a/b/src/liveness.py"}), "📖 读 <code>liveness.py</code>")
         self.assertTrue(tool_card_line("Bash", {"command": "x" * 80}).endswith("…</code>"))
         self.assertEqual(tool_card_line("mcp__browser__browser_navigate", {"url": "https://a.io"}), "🖥 navigate https://a.io")

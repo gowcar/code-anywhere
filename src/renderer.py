@@ -241,7 +241,12 @@ def tool_card_line(tool_name: str, tool_input: dict, width: int = 26) -> str:
             cmd = " ".join(map(str, cmd[-1:] if cmd[:2] in (["bash", "-lc"], ["bash", "-c"]) else cmd))
         if tool_input.get("description"):
             return f"⚡ {html.escape(cut(tool_input['description']))}"
-        cmd = _re.sub(r"^\s*cd\s+\S+\s*(;|&&)\s*", "", str(cmd))
+        cmd = str(cmd).strip()
+        while True:  # 去掉开头没信息量的 cd / sleep / export / source 前缀
+            stripped = _re.sub(r"^(cd|sleep|export|source|set)\s+[^;&|]*?\s*(;|&&)\s*", "", cmd)
+            if stripped == cmd:
+                break
+            cmd = stripped
         return f"⚡ <code>{html.escape(cut(cmd.splitlines()[0] if cmd else ''))}</code>"
     if name in ("read", "edit", "write", "multiedit", "notebookedit"):
         verb = {"read": "读", "write": "写"}.get(name, "改")
