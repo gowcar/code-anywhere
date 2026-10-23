@@ -57,6 +57,30 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
     def test_slot_count_has_hard_cap(self):
         self.assertLessEqual(pool.SLOTS, pool.MAX_SLOTS)
 
+    async def test_direct_mode_runs_novnc_locally_without_ssh(self):
+        started = []
+        class Proc:
+            returncode = None
+            def terminate(self): pass
+        async def fake_exec(*args, **kwargs):
+            started.append(args)
+            return Proc()
+        pool._leases[1] = {"client": "5-5", "session_id": "claude:%9:5:5", "cwd": "/w", "conns": 1}
+        bot = AsyncMock()
+        bot.send_message.return_value.message_id = 1
+        with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_LISTEN", "0.0.0.0:6801"), \
+             patch.object(pool, "RELAY_PUBLIC_URL", "https://me.example:6801"), \
+             patch.object(pool, "RELAY_WEBSOCKIFY", "websockify --web /usr/share/novnc"), \
+             patch.object(pool.asyncio, "create_subprocess_exec", fake_exec), patch.object(pool.asyncio, "sleep", AsyncMock()), \
+             patch.object(pool, "_relay", AsyncMock()) as relay, \
+             patch("src.projects.get_topic", return_value=7), patch("src.api_server._bot", bot):
+            result = await pool.request_help("claude:%9:5:5", "请登录")
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(started[1], ("websockify", "--web", "/usr/share/novnc", "0.0.0.0:6801", "127.0.0.1:5921"))
+        self.assertFalse(any(a[0] == "ssh" for a in started))
+        relay.assert_not_awaited()
+        pool.gate(1).set()
+
     def test_relay_script_saves_and_restores_existing_service(self):
         with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"), \
              patch.object(pool, "RELAY_RESTORE", "ws/run --ssl-only 10.0.1.188:6801 10.0.1.188:5900"):

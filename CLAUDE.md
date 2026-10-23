@@ -17,3 +17,9 @@
 ## 图片 / 大产物（控上下文）
 - 图片、截图**看过后把关键结论提炼成文字**写进 PROGRESS/wiki；图本身可随 compact 丢弃。
 - 不要依赖"上下文里还留着那张图"——落盘的文字才是长期记忆。
+
+## 用户要你配置 code-anywhere 的能力时（新机器 rollout 后最常见）
+用户只会用一句话提需求，你照对应手册一步步问、一步步做，不要让用户自己读文档：
+- “建立 VNC 通道”“配置远程查看 / 浏览器接管” → `docs/REMOTE-VIEW-SETUP.md`
+- “接 GitLab issue 流程” → 运行 `./setup --only gitlab`，按提示向用户要 GitLab 地址和令牌
+- 其他依赖、服务、规则缺失 → `./setup --check` 看缺什么，再 `./setup --only <步骤>` 修

@@ -36,12 +36,13 @@ IDLE_STOP = int(os.getenv("BROWSER_POOL_IDLE_STOP", "1800"))   # 无人租用这
 RELEASE_GRACE = 20                                              # 断开后稍等，给重连留余地
 HELP_TIMEOUT = int(os.getenv("BROWSER_HELP_TIMEOUT", "900"))
 MIN_AVAILABLE_GIB = float(os.getenv("BROWSER_POOL_MIN_AVAILABLE_GIB", "2"))
-# 远程查看经中转机（手机能访问的机器）转出去；不配置则人工接管不可用
-RELAY_HOST = os.getenv("BROWSER_HELP_SSH_HOST", "")             # ssh 主机名（~/.ssh/config 里的 Host）
-RELAY_LISTEN = os.getenv("BROWSER_HELP_LISTEN", "")             # 中转机对外监听，如 10.0.1.188:6801
-RELAY_PUBLIC_URL = os.getenv("BROWSER_HELP_PUBLIC_URL", "")     # 手机打开的地址，如 https://nas.im:36801
+# 远程查看（人工接管）：手机能直接访问本机就用直连模式；不能则经中转机（手机能访问、本机能 ssh 的机器）。
+# 不配置则人工接管不可用。设置方法见 docs/REMOTE-VIEW-SETUP.md（给 Agent 照着做的手册）
+RELAY_HOST = os.getenv("BROWSER_HELP_SSH_HOST", "")             # 中转机 ssh 主机名；留空 = 直连模式
+RELAY_LISTEN = os.getenv("BROWSER_HELP_LISTEN", "")             # noVNC 对外监听（中转机或本机），如 0.0.0.0:6801
+RELAY_PUBLIC_URL = os.getenv("BROWSER_HELP_PUBLIC_URL", "")     # 手机打开的地址，如 https://example.com:36801
 RELAY_PORT = int(os.getenv("BROWSER_HELP_RELAY_PORT", "16801"))  # 中转机本机上的隧道口
-RELAY_WEBSOCKIFY = os.getenv("BROWSER_HELP_WEBSOCKIFY", "")     # 中转机上起 noVNC 的命令前缀（不含监听与目标）
+RELAY_WEBSOCKIFY = os.getenv("BROWSER_HELP_WEBSOCKIFY", "")     # 起 noVNC 的命令前缀（不含监听与目标），如 websockify --web /usr/share/novnc
 # 对外端口原本被别的服务占着时，结束后用这条命令恢复它。照抄原进程命令行不可靠（依赖它启动时的环境，
 # 2026-10-23 实测恢复失败），所以要求配置一条确认能用的命令；不配置就只停不恢复，并在 TG 里说明
 RELAY_RESTORE = os.getenv("BROWSER_HELP_RESTORE", "")
@@ -491,7 +492,8 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 # ---------- 人工接管 ----------
 
 def help_available() -> bool:
-    return bool(RELAY_HOST and RELAY_LISTEN and RELAY_PUBLIC_URL and RELAY_WEBSOCKIFY)
+    """两种模式：配了 BROWSER_HELP_SSH_HOST 走中转机；没配就是直连（手机能直接访问本机，noVNC 在本机临时起）。"""
+    return bool(RELAY_LISTEN and RELAY_PUBLIC_URL and RELAY_WEBSOCKIFY)
 
 
 def _relay_script(action: str) -> str:
@@ -536,7 +538,7 @@ async def _relay(action: str) -> str:
 
 async def request_help(source_session_id: str, reason: str) -> dict:
     if not help_available():
-        return {"status": "unavailable", "detail": "未配置远程查看（BROWSER_HELP_* 环境变量），无法请用户接管"}
+        return {"status": "unavailable", "detail": "这台机器还没配置远程查看，无法请用户接管；告诉用户：在 code-anywhere 的 Thread 里说“建立 VNC 通道”即可配置"}
     client = "-".join(source_session_id.split(":")[-2:])
     slot = lease_of(client)
     if slot is None:
@@ -562,16 +564,22 @@ async def request_help(source_session_id: str, reason: str) -> dict:
             "-passwd", password, "-forever", "-shared", "-noxdamage", "-quiet",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         item["procs"].append(vnc)
-        tunnel = await asyncio.create_subprocess_exec(
-            "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-            "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{vnc_port(slot)}", RELAY_HOST,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        item["procs"].append(tunnel)
+        if RELAY_HOST:   # 中转机模式：ssh 反向隧道 + 中转机上临时起 noVNC
+            link = await asyncio.create_subprocess_exec(
+                "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+                "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{vnc_port(slot)}", RELAY_HOST,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        else:            # 直连模式：noVNC 在本机临时起，对外监听 BROWSER_HELP_LISTEN
+            link = await asyncio.create_subprocess_exec(
+                *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{vnc_port(slot)}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        item["procs"].append(link)
         await asyncio.sleep(2)
-        if tunnel.returncode is not None or vnc.returncode is not None:
-            raise RuntimeError("本机 VNC 或 ssh 隧道没有起来")
-        await _relay("start")
-        item["relay"] = True
+        if link.returncode is not None or vnc.returncode is not None:
+            raise RuntimeError("本机 VNC 或" + ("到中转机的 ssh 隧道" if RELAY_HOST else " noVNC") + "没有起来")
+        if RELAY_HOST:
+            await _relay("start")
+            item["relay"] = True
         gate(slot).clear()
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         url = f"{RELAY_PUBLIC_URL.rstrip('/')}/vnc.html?autoconnect=1&resize=scale&password={password}"
