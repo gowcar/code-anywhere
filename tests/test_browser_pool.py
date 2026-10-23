@@ -11,7 +11,7 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         pool._help.clear()
         self.patches = [patch.object(pool, "start_slot", AsyncMock()),
                         patch.object(pool, "_version", AsyncMock(return_value=None)),
-                        patch.object(pool, "export_cookies", AsyncMock()),
+                        patch.object(pool, "export_identity", AsyncMock()),
                         patch.object(pool, "_owner", AsyncMock(side_effect=lambda c: {"project": f"p{c}", "session_id": f"claude:%1:{c.replace('-', ':')}"})),
                         patch.object(pool, "RELEASE_GRACE", 0)]
         for p in self.patches:
@@ -31,7 +31,7 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         pool._schedule_release(slot, "1-1")
         await pool._leases[slot]["release_task"]
         self.assertNotIn(slot, pool._leases)
-        pool.export_cookies.assert_awaited_with(slot)
+        pool.export_identity.assert_awaited_with(slot)
 
     async def test_lease_kept_while_user_is_operating(self):
         slot = await pool.acquire("1-1")

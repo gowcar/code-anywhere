@@ -4,7 +4,7 @@
   用户单元，桥接重启不会带走浏览器；用到才启动，空闲回收。
 - 租用：每个 CLI 进程（pid:启动时间）的 Playwright MCP 经桥接中转连 CDP，第一次连上时租一个槽位，
   断开（Playwright MCP 空闲超时会主动断开）后归还。一个槽位同一时间只给一个会话，互不抢标签页。
-- 共用身份：所有项目共用一个登录身份。槽位归还、人工接管结束、槽位停止时导出 cookie 到共享
+- 共用身份：所有项目共用一个登录身份。槽位归还、人工接管结束、槽位停止时导出 cookie 和 localStorage 到共享
   存储，并推给另一个在运行的槽位；槽位启动时导入。
 - 人工接管：会话请求帮忙 → 本机起 x11vnc（一次性密码）→ ssh 反向隧道到中转机 → 中转机上临时起
   noVNC（websockify）→ 会话所在 Thread 收到 [打开浏览器][我弄好了]。结束或超时后全部停掉，
@@ -29,6 +29,8 @@ SLOTS = max(1, min(int(os.getenv("BROWSER_POOL_SLOTS", "2")), MAX_SLOTS))
 MAX_TABS = int(os.getenv("BROWSER_POOL_MAX_TABS", "6"))         # 每个槽位最多这么多标签页
 BASE = Path(os.getenv("BROWSER_POOL_DIR", str(Path.home() / ".local/share/code-anywhere/browser")))
 COOKIES = BASE / "cookies.json"
+STORAGE = BASE / "local-storage.json"          # 各网站 localStorage（登录令牌常在这里）
+STORAGE_MAX_PER_ORIGIN = 2 << 20
 SCREEN = os.getenv("BROWSER_POOL_SCREEN", "1280x800")
 IDLE_STOP = int(os.getenv("BROWSER_POOL_IDLE_STOP", "1800"))   # 无人租用这么久就停掉槽位
 RELEASE_GRACE = 20                                              # 断开后稍等，给重连留余地
@@ -145,61 +147,166 @@ async def start_slot(slot: int) -> None:
         await asyncio.sleep(0.2)
     else:
         raise RuntimeError(f"浏览器槽位 {slot} 启动后 20 秒内没有响应")
-    await import_cookies(slot)
+    await import_identity(slot)
     log.info("[browser] 槽位 %s 已启动 display=:%s cdp=%s", slot, display(slot), cdp_port(slot))
 
 
 async def stop_slot(slot: int) -> None:
     if await _version(slot):
-        await export_cookies(slot)
+        await export_identity(slot)
     await _run("systemctl", "--user", "stop", unit(slot))
     log.info("[browser] 槽位 %s 已停止", slot)
 
 
-async def _cdp(slot: int, method: str, params: dict | None = None):
+class _Session:
+    """浏览器级 CDP 连接：按 id 等回复，事件交给 on_event。"""
+
+    def __init__(self, ws):
+        self.ws, self.next_id, self.on_event = ws, 0, None
+
+    async def send(self, method: str, params: dict | None = None, session: str | None = None, timeout: float = 15):
+        self.next_id += 1
+        message = {"id": self.next_id, "method": method, "params": params or {}}
+        if session:
+            message["sessionId"] = session
+        await self.ws.send_json(message)
+        async def wait():
+            async for msg in self.ws:
+                data = json.loads(msg.data)
+                if data.get("id") == message["id"]:
+                    return data
+                if "method" in data and self.on_event:
+                    await self.on_event(data)
+        data = await asyncio.wait_for(wait(), timeout)
+        if "error" in data:
+            raise RuntimeError(f"{method}: {data['error'].get('message')}")
+        return data.get("result", {})
+
+
+async def _browser(slot: int):
     info = await _version(slot)
     if not info:
         return None
-    async with aiohttp.ClientSession(trust_env=False) as http:
-        async with http.ws_connect(info["webSocketDebuggerUrl"], max_msg_size=0) as ws:
-            await ws.send_json({"id": 1, "method": method, "params": params or {}})
-            async for msg in ws:
-                data = json.loads(msg.data)
-                if data.get("id") == 1:
-                    return data.get("result")
-    return None
+    http = aiohttp.ClientSession(trust_env=False)
+    ws = await http.ws_connect(info["webSocketDebuggerUrl"], max_msg_size=0)
+    return http, ws
 
 
-def _load_cookies() -> list[dict]:
+async def _cdp(slot: int, method: str, params: dict | None = None):
+    conn = await _browser(slot)
+    if not conn:
+        return None
+    http, ws = conn
     try:
-        return json.loads(COOKIES.read_text())
+        return await _Session(ws).send(method, params)
+    finally:
+        await ws.close()
+        await http.close()
+
+
+def _load(path: Path, default):
+    try:
+        return json.loads(path.read_text())
     except (OSError, ValueError):
-        return []
+        return default
 
 
-async def export_cookies(slot: int) -> None:
-    """把这个槽位的 cookie 合并进共享身份，并推给另一个在运行的槽位。"""
-    result = await _cdp(slot, "Storage.getCookies")
-    if not result:
-        return
-    merged = {(c["name"], c["domain"], c["path"]): c for c in _load_cookies()}
-    merged.update({(c["name"], c["domain"], c["path"]): c for c in result.get("cookies", [])})
-    cookies = list(merged.values())
+def _save(path: Path, data) -> None:
     BASE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = COOKIES.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cookies))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
     tmp.chmod(0o600)
-    tmp.replace(COOKIES)
+    tmp.replace(path)
+
+
+def _origin(url: str) -> str | None:
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme in {"http", "https"} and parts.netloc else None
+
+
+async def _page_storage(slot: int) -> dict[str, dict]:
+    """当前打开的各网站的 localStorage（很多网站把登录令牌放这里，例如 SPACE 的 session）。"""
+    result = {}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as http:
+            pages = await (await http.get(f"http://127.0.0.1:{cdp_port(slot)}/json/list")).json(content_type=None)
+            for page in pages:
+                origin = _origin(page.get("url", ""))
+                if page.get("type") != "page" or not origin or origin in result:
+                    continue
+                async with http.ws_connect(page["webSocketDebuggerUrl"], max_msg_size=0) as ws:
+                    value = await _Session(ws).send("Runtime.evaluate", {
+                        "expression": "JSON.stringify(Object.assign({}, localStorage))", "returnByValue": True})
+                    data = json.loads(value.get("result", {}).get("value") or "{}")
+                    if len(json.dumps(data)) <= STORAGE_MAX_PER_ORIGIN:
+                        result[origin] = data
+    except Exception:
+        log.warning("[browser] 读取槽位 %s 的 localStorage 失败", slot, exc_info=True)
+    return result
+
+
+async def export_identity(slot: int) -> None:
+    """把这个槽位的 cookie 和 localStorage 合并进共享身份，并推给另一个在运行的槽位。"""
+    result = await _cdp(slot, "Storage.getCookies")
+    if result is None:
+        return
+    merged = {(c["name"], c["domain"], c["path"]): c for c in _load(COOKIES, [])}
+    merged.update({(c["name"], c["domain"], c["path"]): c for c in result.get("cookies", [])})
+    _save(COOKIES, list(merged.values()))
+    storage = _load(STORAGE, {})
+    storage.update(await _page_storage(slot))   # 打开着的网站以当前页面为准
+    _save(STORAGE, storage)
     for other in range(1, SLOTS + 1):
         if other != slot and await _version(other):
-            await import_cookies(other)
+            await import_identity(other)
 
 
-async def import_cookies(slot: int) -> None:
+async def import_identity(slot: int) -> None:
     cookies = [{k: v for k, v in c.items() if k not in {"size", "session", "priority", "sourcePort",
-                                                         "sourceScheme", "partitionKey"}} for c in _load_cookies()]
+                                                         "sourceScheme", "partitionKey"}} for c in _load(COOKIES, [])]
     if cookies:
         await _cdp(slot, "Storage.setCookies", {"cookies": cookies})
+    storage = _load(STORAGE, {})
+    if storage:
+        try:
+            await _write_storage(slot, storage)
+        except Exception:
+            log.warning("[browser] 写入槽位 %s 的 localStorage 失败", slot, exc_info=True)
+
+
+async def _write_storage(slot: int, storage: dict[str, dict]) -> None:
+    """localStorage 只能在该网站的页面里写：开一个临时标签页，把对该网站首页的请求在浏览器内部
+    拦下来直接回一个空白页（不访问网络），写完关掉。"""
+    conn = await _browser(slot)
+    if not conn:
+        return
+    http, ws = conn
+    cdp = _Session(ws)
+    target = None
+    try:
+        target = (await cdp.send("Target.createTarget", {"url": "about:blank"}))["targetId"]
+        session = (await cdp.send("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+
+        async def on_event(event):
+            if event.get("method") == "Fetch.requestPaused" and event.get("sessionId") == session:
+                await ws.send_json({"id": 0, "sessionId": session, "method": "Fetch.fulfillRequest", "params": {
+                    "requestId": event["params"]["requestId"], "responseCode": 200,
+                    "responseHeaders": [{"name": "Content-Type", "value": "text/html"}], "body": ""}})
+        cdp.on_event = on_event
+        await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "resourceType": "Document"}]}, session)
+        for origin, items in storage.items():
+            await cdp.send("Page.navigate", {"url": origin + "/"}, session)
+            script = "(items => { for (const [k, v] of Object.entries(items)) localStorage.setItem(k, v); })"
+            await cdp.send("Runtime.evaluate", {"expression": f"{script}({json.dumps(items)})"}, session)
+    finally:
+        if target:
+            try:
+                await cdp.send("Target.closeTarget", {"targetId": target})
+            except Exception:
+                pass
+        await ws.close()
+        await http.close()
 
 
 # ---------- 租用 ----------
@@ -260,9 +367,9 @@ async def _release_later(slot: int, client: str) -> None:
         _leases.pop(slot, None)
     _last_used[slot] = time.time()
     try:
-        await export_cookies(slot)
+        await export_identity(slot)
     except Exception:
-        log.warning("[browser] 槽位 %s 导出 cookie 失败", slot, exc_info=True)
+        log.warning("[browser] 槽位 %s 导出登录身份失败", slot, exc_info=True)
     log.info("[browser] 槽位 %s 已归还（%s）", slot, client)
 
 
@@ -389,8 +496,8 @@ def help_available() -> bool:
 
 def _relay_script(action: str) -> str:
     """中转机上的启停脚本。原来占着对外端口的服务先记下命令再停，结束后按原命令恢复。"""
-    host, port = RELAY_LISTEN.rsplit(":", 1)
     if action == "start":
+        host, port = RELAY_LISTEN.rsplit(":", 1)
         return f"""set -e
 mkdir -p ~/.code-anywhere && cd ~/.code-anywhere
 ok=; for i in $(seq 20); do nc -z 127.0.0.1 {RELAY_PORT} 2>/dev/null && ok=1 && break; sleep 0.5; done
@@ -502,9 +609,9 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
         except Exception:
             log.warning("[browser] 中转机收尾失败", exc_info=True)
     try:
-        await export_cookies(item["slot"])
+        await export_identity(item["slot"])
     except Exception:
-        log.warning("[browser] 导出 cookie 失败", exc_info=True)
+        log.warning("[browser] 导出登录身份失败", exc_info=True)
     from src.api_server import _bot
     from src import config
     if _bot and item.get("message_id"):
