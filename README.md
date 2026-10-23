@@ -2,39 +2,45 @@
 
 **在手机 Telegram 里，远程驱动你服务器上的 Claude Code 和 Codex。**
 
-每个项目对应 Telegram 群里的一个话题。你在话题里说话，消息会被送进服务器上那个项目的 CLI 会话；CLI 的回复、工具调用、截图、权限审批，会实时回到同一个话题。电脑上的终端和手机上的 TG 用的是**同一个会话**，随时切换，不丢上下文。
+每个项目对应和 bot 私聊里的一个 Thread（也支持话题群组）。你在 Thread 里说话，消息会被送进服务器上那个项目的 CLI 会话；CLI 的回复、状态、截图、权限审批，会实时回到同一个 Thread。电脑上的终端和手机上的 TG 用的是**同一个会话**，随时切换，不丢上下文。
 
 ```mermaid
 flowchart LR
-    phone["📱 Telegram 群<br/>话题 = 项目"] <-->|Bot API| bridge["code-anywhere<br/>常驻服务"]
+    phone["📱 Telegram 私聊<br/>Thread = 项目"] <-->|Bot API| bridge["code-anywhere<br/>常驻服务"]
     bridge <-->|tmux 注入 / 读取会话日志| cli1["Claude Code<br/>项目 A"]
     bridge <--> cli2["Codex<br/>项目 B"]
     bridge <--> cli3["…更多项目"]
     laptop["💻 电脑终端<br/>tmux attach"] <--> cli1
 ```
 
-## 快速开始
+## 快速开始（5 步）
 
-需要：一台 Linux 或 macOS 机器（可以是 SSH 进去的服务器）和一个 Telegram 账号。其余依赖（Python、tmux、Node、Claude Code、Codex……）`./setup` 都会自动安装。
+**1. 准备好这些**
+- 一台 Linux 机器（Ubuntu / Debian 最省事，能 `sudo` 装包更好；macOS 也行，但共享浏览器暂不支持）
+- 这台机器能拉这个仓库：仓库是私有的，把机器的 SSH 公钥加到有权限的 GitHub 账号（或加成仓库的 Deploy key）
+- Telegram 账号，以及 Claude 账号（订阅或 API key）；想用 Codex 再准备 ChatGPT 账号
 
+**2. 建一个新 bot**：Telegram 找 [@BotFather](https://t.me/BotFather) → `/newbot` → 记下 token。再发 `/mybots` → 选这个 bot → Bot Settings → **Threaded Mode** → 打开。
+> 一个 bot 同一时间只能被一台机器接收，新机器请用新 bot。
+
+**3. 安装**
 ```sh
 git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
-cd ~/workspace/code-anywhere
-./setup
+cd ~/workspace/code-anywhere && ./setup
 ```
+按提示走：粘贴 token → 打开和 bot 的私聊随便发一句话（自动识别你的账号，只允许你本人用）→ 按提示登录 Claude / Codex。其余（依赖、服务、MCP、技能、规则）全自动。可以反复执行，`./setup --check` 只检查不改动。
 
-`./setup` 是交互式的，按提示一步步来，大约 10 分钟：
+**4. 开始用**：在和 bot 的私聊里发 `/new code-anywhere`，打开它自己的 Thread；新项目发 `/new 项目名`（加 `codex` 用 Codex）。
 
-1. **装依赖**：Python、tmux、Node、Claude Code、Codex、glab，缺什么自动装什么；`./setup --yes` 全部默认同意。
-2. **建 bot**：在 Telegram 找 [@BotFather](https://t.me/BotFather) → `/newbot`，把 token 粘贴给 setup，它会立刻验证。
-3. **建群**：新建群 → 开启「话题 / Topics」→ 把 bot 设为管理员（勾选“管理话题”）→ 在群里随便发一句话。setup 收到后**自动识别群 ID 和你的账号**，只允许你本人使用。
-4. **其余全自动**：Claude hooks、会话通信 MCP、全局规则、开机自启的常驻服务，最后往群里发一条“✅ 已就绪”。
+**5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**：
+- “建立 VNC 通道” —— 需要登录时可以在手机上接管共享浏览器
+- “接 GitLab issue 流程” —— 在 TG 里提需求、验收
 
-`./setup` 可以反复执行：已经好的步骤直接跳过，只修缺的。`./setup --check` 只检查不改动。详见 [docs/PROVISIONING.md](docs/PROVISIONING.md)。
+它会问你需要的东西，然后帮你配好。
 
 ## 日常怎么用
 
-**开始一个项目**：在群里发 `/new 项目名`（默认 Claude，`/new 项目名 codex` 用 Codex），立刻出现同名话题，进去直接说话。已有的目录也可以：在服务器上进入目录运行一次 `claude` 或 `codex` 说句话，5 分钟内自动出现话题。
+**开始一个项目**：在私聊里发 `/new 项目名`（默认 Claude，`/new 项目名 codex` 用 Codex），立刻出现同名 Thread，进去直接说话。已有的目录也可以：在服务器上进入目录运行一次 `claude` 或 `codex` 说句话，5 分钟内自动出现话题。
 
 **在话题里**：
 
