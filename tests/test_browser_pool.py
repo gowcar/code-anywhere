@@ -81,6 +81,29 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         relay.assert_not_awaited()
         pool.gate(1).set()
 
+    def test_view_mode_defaults_to_cloudflare_without_config(self):
+        with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_PUBLIC_URL", ""), \
+             patch.object(pool, "_cloudflared", return_value="/bin/cloudflared"), \
+             patch.object(pool, "_websockify", return_value="/bin/websockify"), \
+             patch.object(pool, "_novnc_web", return_value="/usr/share/novnc"):
+            self.assertEqual(pool.view_mode(), "cloudflare")
+            with patch.object(pool, "RELAY_PUBLIC_URL", "https://me:1"), patch.object(pool, "RELAY_LISTEN", "0.0.0.0:1"), \
+                 patch.object(pool, "RELAY_WEBSOCKIFY", "websockify"):
+                self.assertEqual(pool.view_mode(), "direct")
+        with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_PUBLIC_URL", ""), \
+             patch.object(pool, "_cloudflared", return_value=None):
+            self.assertIsNone(pool.view_mode())
+
+    async def test_cloudflare_url_is_read_from_log(self):
+        lines = [b"INF Requesting new quick Tunnel\n",
+                 b"INF |  https://abc-def-123.trycloudflare.com  |\n", b""]
+        class Stream:
+            async def readline(self):
+                return lines.pop(0) if lines else b""
+        class Proc:
+            stderr = Stream()
+        self.assertEqual(await pool._cloudflare_url(Proc()), "https://abc-def-123.trycloudflare.com")
+
     def test_relay_script_saves_and_restores_existing_service(self):
         with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"), \
              patch.object(pool, "RELAY_RESTORE", "ws/run --ssl-only 10.0.1.188:6801 10.0.1.188:5900"):

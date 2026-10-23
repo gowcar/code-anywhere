@@ -491,9 +491,51 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 
 # ---------- 人工接管 ----------
 
+def _which(name: str, *extra: Path) -> str | None:
+    import shutil
+    found = shutil.which(name)
+    if found:
+        return found
+    return next((str(p) for p in extra if p.exists()), None)
+
+
+def _novnc_web() -> str | None:
+    for folder in (os.getenv("NOVNC_WEB", ""), str(Path.home() / ".local/share/code-anywhere/noVNC"), "/usr/share/novnc"):
+        if folder and (Path(folder) / "vnc.html").exists():
+            return folder
+    return None
+
+
+def view_mode() -> str | None:
+    """远程查看怎么连到手机：
+    - cloudflare（默认，零配置）：本机临时起 noVNC + Cloudflare 免费临时隧道，拿到一个 https://….trycloudflare.com 地址
+    - relay：配了 BROWSER_HELP_SSH_HOST，经中转机转出去（自定义隧道）
+    - direct：配了 BROWSER_HELP_PUBLIC_URL，手机能直接访问本机，noVNC 在本机对外监听（自定义）
+    """
+    if RELAY_HOST and RELAY_LISTEN and RELAY_PUBLIC_URL and RELAY_WEBSOCKIFY:
+        return "relay"
+    if RELAY_PUBLIC_URL and RELAY_LISTEN and RELAY_WEBSOCKIFY:
+        return "direct"
+    if _cloudflared() and _websockify() and _novnc_web():
+        return "cloudflare"
+    return None
+
+
+def _cloudflared() -> str | None:
+    return _which("cloudflared", Path.home() / ".local/bin/cloudflared")
+
+
+def _websockify() -> str | None:
+    from src.config import PROJECT_ROOT
+    return _which("websockify", PROJECT_ROOT / ".venv/bin/websockify")
+
+
 def help_available() -> bool:
-    """两种模式：配了 BROWSER_HELP_SSH_HOST 走中转机；没配就是直连（手机能直接访问本机，noVNC 在本机临时起）。"""
-    return bool(RELAY_LISTEN and RELAY_PUBLIC_URL and RELAY_WEBSOCKIFY)
+    return view_mode() is not None
+
+
+def view_port(slot: int) -> int:
+    return 6080 + slot
 
 
 def _relay_script(action: str) -> str:
@@ -536,69 +578,145 @@ async def _relay(action: str) -> str:
     return out.decode(errors="replace").strip()
 
 
+async def _cloudflare_url(proc, timeout: float = 40) -> str:
+    """cloudflared 把临时地址打印在日志里（stderr）。"""
+    import re
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        line = await asyncio.wait_for(proc.stderr.readline(), max(0.1, deadline - time.time()))
+        if not line:
+            break
+        found = re.search(rb"https://[a-z0-9-]+\.trycloudflare\.com", line)
+        if found:
+            async def drain():   # 继续读掉日志，避免管道写满卡住 cloudflared
+                while await proc.stderr.readline():
+                    pass
+            asyncio.create_task(drain())
+            return found.group(0).decode()
+    raise RuntimeError("Cloudflare 临时隧道没有给出地址（检查这台机器能否访问 Internet）")
+
+
+async def _open_view(item: dict, slot: int) -> str:
+    """起 VNC 并把它送到手机能打开的地址，返回 noVNC 网页地址（不含参数）。进程记在 item["procs"]。"""
+    mode = view_mode()
+    vnc = await asyncio.create_subprocess_exec(
+        "x11vnc", "-display", f":{display(slot)}", "-localhost", "-rfbport", str(vnc_port(slot)),
+        "-passwd", item["password"], "-forever", "-shared", "-noxdamage", "-quiet",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    item["procs"].append(vnc)
+    if mode == "relay":   # 中转机：ssh 反向隧道 + 中转机上临时起 noVNC
+        link = await asyncio.create_subprocess_exec(
+            "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
+            "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{vnc_port(slot)}", RELAY_HOST,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    elif mode == "direct":
+        link = await asyncio.create_subprocess_exec(
+            *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{vnc_port(slot)}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    else:                 # cloudflare：noVNC 只听本机，由临时隧道转出去
+        link = await asyncio.create_subprocess_exec(
+            _websockify(), "--web", _novnc_web(), f"127.0.0.1:{view_port(slot)}", f"127.0.0.1:{vnc_port(slot)}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    item["procs"].append(link)
+    await asyncio.sleep(2)
+    if link.returncode is not None or vnc.returncode is not None:
+        raise RuntimeError("本机 VNC 或 noVNC / 隧道没有起来")
+    if mode == "relay":
+        await _relay("start")
+        item["relay"] = True
+        return RELAY_PUBLIC_URL
+    if mode == "direct":
+        return RELAY_PUBLIC_URL
+    tunnel = await asyncio.create_subprocess_exec(
+        _cloudflared(), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{view_port(slot)}",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    item["procs"].append(tunnel)
+    return await _cloudflare_url(tunnel)
+
+
+async def _start_item(kind: str, slot: int, topic: int, reason: str, **extra) -> tuple[str, dict]:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from src.api_server import _bot
+    from src import config
+    help_id = secrets.token_hex(4)
+    item = {"kind": kind, "slot": slot, "reason": reason[:300], "started": time.time(), "status": "waiting",
+            "procs": [], "topic": topic, "password": secrets.token_urlsafe(6)[:8], **extra}
+    _help[help_id] = item
+    try:
+        base = await _open_view(item, slot)
+        url = f"{base.rstrip('/')}/vnc.html?autoconnect=1&resize=scale&password={item['password']}"
+        minutes = HELP_TIMEOUT // 60
+        if kind == "help":
+            gate(slot).clear()
+            buttons = [InlineKeyboardButton("🖥 打开浏览器", url=url),
+                       InlineKeyboardButton("✅ 我弄好了", callback_data=f"bh:done:{help_id}", style="success")]
+            text = (f"🖥 需要你在共享浏览器里操作：{item['reason']}\n\n点“打开浏览器”进入，弄好后点“我弄好了”。"
+                    f"链接 {minutes} 分钟内有效，期间会话暂停操作这个浏览器。")
+        else:
+            buttons = [InlineKeyboardButton("🖥 打开浏览器", url=url),
+                       InlineKeyboardButton("关闭", callback_data=f"bh:close:{help_id}", style="danger")]
+            text = (f"🖥 共享浏览器（槽位 {slot}）：{item['reason']}\n\n点“打开浏览器”查看和操作，用完点“关闭”。"
+                    f"链接 {minutes} 分钟后自动失效。")
+        sent = await _bot.send_message(chat_id=config.CHAT_ID, message_thread_id=topic, parse_mode=None,
+                                       reply_markup=InlineKeyboardMarkup([buttons]), text=text)
+        item["message_id"] = sent.message_id
+    except Exception:
+        log.warning("[browser] 打开远程查看失败", exc_info=True)
+        await finish_help(help_id, "failed", notify=False)
+        raise
+    log.info("[browser] %s %s 槽位 %s：%s", kind, help_id, slot, item["reason"])
+    return help_id, item
+
+
 async def request_help(source_session_id: str, reason: str) -> dict:
     if not help_available():
-        return {"status": "unavailable", "detail": "这台机器还没配置远程查看，无法请用户接管；告诉用户：在 code-anywhere 的 Thread 里说“建立 VNC 通道”即可配置"}
+        return {"status": "unavailable", "detail": "这台机器缺少远程查看组件（cloudflared / noVNC），告诉用户运行 ./setup --only browser"}
     client = "-".join(source_session_id.split(":")[-2:])
     slot = lease_of(client)
     if slot is None:
         return {"status": "not_leased", "detail": "你还没有在用共享浏览器：先用浏览器工具打开需要用户操作的页面，再请求帮忙"}
-    existing = next((k for k, h in _help.items() if h["slot"] == slot and h["status"] == "waiting"), None)
+    existing = next((k for k, h in _help.items() if h["slot"] == slot and h["status"] == "waiting" and h["kind"] == "help"), None)
     if existing:
         return {"status": "waiting", "help_id": existing, "detail": "已经在等用户操作这个浏览器"}
     from src import projects
     from src.api_server import _bot
-    from src import config
     lease = _leases[slot]
     topic = projects.get_topic(lease.get("cwd") or "")
     if not _bot or not topic:
         return {"status": "unavailable", "detail": "这个项目没有绑定 TG Thread，无法通知用户"}
-    help_id = secrets.token_hex(4)
-    password = secrets.token_urlsafe(6)[:8]
-    item = {"slot": slot, "client": client, "session_id": lease.get("session_id"), "reason": reason[:300],
-            "started": time.time(), "status": "waiting", "procs": [], "topic": topic}
-    _help[help_id] = item
     try:
-        vnc = await asyncio.create_subprocess_exec(
-            "x11vnc", "-display", f":{display(slot)}", "-localhost", "-rfbport", str(vnc_port(slot)),
-            "-passwd", password, "-forever", "-shared", "-noxdamage", "-quiet",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        item["procs"].append(vnc)
-        if RELAY_HOST:   # 中转机模式：ssh 反向隧道 + 中转机上临时起 noVNC
-            link = await asyncio.create_subprocess_exec(
-                "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-                "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{vnc_port(slot)}", RELAY_HOST,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        else:            # 直连模式：noVNC 在本机临时起，对外监听 BROWSER_HELP_LISTEN
-            link = await asyncio.create_subprocess_exec(
-                *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{vnc_port(slot)}",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        item["procs"].append(link)
-        await asyncio.sleep(2)
-        if link.returncode is not None or vnc.returncode is not None:
-            raise RuntimeError("本机 VNC 或" + ("到中转机的 ssh 隧道" if RELAY_HOST else " noVNC") + "没有起来")
-        if RELAY_HOST:
-            await _relay("start")
-            item["relay"] = True
-        gate(slot).clear()
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        url = f"{RELAY_PUBLIC_URL.rstrip('/')}/vnc.html?autoconnect=1&resize=scale&password={password}"
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🖥 打开浏览器", url=url),
-                                          InlineKeyboardButton("✅ 我弄好了", callback_data=f"bh:done:{help_id}",
-                                                               style="success")]])
-        minutes = HELP_TIMEOUT // 60
-        sent = await _bot.send_message(
-            chat_id=config.CHAT_ID, message_thread_id=topic, reply_markup=keyboard, parse_mode=None,
-            text=f"🖥 需要你在共享浏览器里操作：{item['reason']}\n\n点“打开浏览器”进入，弄好后点“我弄好了”。"
-                 f"链接 {minutes} 分钟内有效，期间会话暂停操作这个浏览器。")
-        item["message_id"] = sent.message_id
+        help_id, _ = await _start_item("help", slot, topic, reason, client=client, session_id=lease.get("session_id"))
     except Exception as exc:
-        log.warning("[browser] 发起接管失败", exc_info=True)
-        await finish_help(help_id, "failed", notify=False)
         return {"status": "failed", "detail": str(exc)}
-    log.info("[browser] 接管 %s 槽位 %s：%s", help_id, slot, item["reason"])
     return {"status": "waiting", "help_id": help_id,
             "detail": "已在 TG 请用户操作；用户点“我弄好了”或超时后，你会收到一条消息，也可用 browser_help_status 查询"}
+
+
+async def open_for_user(topic: int, cwd: str) -> str:
+    """TG /vnc：给用户打开共享浏览器的画面。这个项目的会话正在用的槽位优先；没有就给用户自己租一个。"""
+    if not help_available():
+        return "这台机器缺少远程查看组件（cloudflared / noVNC），请运行 ./setup --only browser"
+    slot = next((s for s, lease in _leases.items() if lease.get("cwd") == cwd), None)
+    client = None
+    if slot is None:
+        client = f"tg-{topic}"
+        try:
+            slot = await acquire(client)
+        except RuntimeError as exc:
+            return str(exc)
+        _leases[slot].update(cwd=cwd, project=Path(cwd).name + "（你）")
+    existing = next((h for h in _help.values() if h["slot"] == slot and h["status"] == "waiting"), None)
+    if existing:
+        return "这个浏览器的远程查看已经开着，用上面那条消息里的按钮"
+    what = "这个项目的会话正在用的浏览器" if client is None else "空闲的共享浏览器，可以提前登录网站（所有项目共用登录状态）"
+    try:
+        await _start_item("view", slot, topic, what, user_client=client)
+    except Exception as exc:
+        if client:
+            async with _lock:
+                _leases.pop(slot, None)
+        return f"⚠️ 打开失败：{exc}"
+    return ""
 
 
 async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
@@ -607,7 +725,8 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
         return
     item["status"] = status
     item["finished"] = time.time()
-    gate(item["slot"]).set()
+    if item.get("kind", "help") == "help":
+        gate(item["slot"]).set()
     for proc in item.pop("procs", []):
         if proc.returncode is None:
             proc.terminate()
@@ -623,17 +742,22 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
     from src.api_server import _bot
     from src import config
     if _bot and item.get("message_id"):
-        label = {"done": "✅ 已完成", "timeout": "⌛ 已超时，远程查看已关闭", "failed": "⚠️ 未能打开远程查看",
-                 "cancelled": "已取消，远程查看已关闭"}[status]
+        label = {"done": "✅ 已完成", "closed": "已关闭", "timeout": "⌛ 已超时，远程查看已关闭",
+                 "failed": "⚠️ 未能打开远程查看", "cancelled": "已取消，远程查看已关闭"}[status]
         try:
             await _bot.edit_message_text(chat_id=config.CHAT_ID, message_id=item["message_id"], parse_mode=None,
                                          text=f"🖥 共享浏览器：{item['reason']}\n\n{label}")
         except Exception:
             pass
+    if item.get("user_client"):   # /vnc 给用户临时租的槽位，关了就还
+        async with _lock:
+            if _leases.get(item["slot"], {}).get("client") == item["user_client"]:
+                _leases.pop(item["slot"], None)
+        _last_used[item["slot"]] = time.time()
     lease = _leases.get(item["slot"])
     if lease and not lease["conns"]:
         _schedule_release(item["slot"], lease["client"])
-    if notify and item.get("session_id"):
+    if notify and item.get("kind", "help") == "help" and item.get("session_id"):
         from src import agent_sessions
         text = {"done": f"用户已在共享浏览器里完成操作（{item['reason']}），请继续。",
                 "timeout": f"用户没有在 {HELP_TIMEOUT // 60} 分钟内完成共享浏览器里的操作（{item['reason']}），远程查看已关闭；需要时可重新请求。"}.get(status)
@@ -643,7 +767,7 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
                                                   sender="code-anywhere", urgent=True)
             except Exception:
                 log.warning("[browser] 通知会话失败", exc_info=True)
-    log.info("[browser] 接管 %s 结束：%s", help_id, status)
+    log.info("[browser] %s 结束：%s", help_id, status)
 
 
 def help_status(help_id: str) -> dict:
@@ -656,6 +780,7 @@ def help_status(help_id: str) -> dict:
 
 def status() -> dict:
     return {"slots": SLOTS, "help_available": help_available(),
+            "mode": view_mode(),
             "leases": {slot: {k: v for k, v in lease.items() if k != "release_task"} for slot, lease in _leases.items()},
             "help": {k: help_status(k) for k in _help}}
 

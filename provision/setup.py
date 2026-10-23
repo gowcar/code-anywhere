@@ -12,6 +12,7 @@ import io
 import json
 import os
 import platform
+import shlex
 import shutil
 import socket
 import subprocess
@@ -490,6 +491,43 @@ def step_mcp():
                     run([which("codex"), "mcp", "add", name, "--", cmd], capture=False)
 
 
+NOVNC_DIR = HOME / ".local" / "share" / "code-anywhere" / "noVNC"
+NOVNC_TARBALL = "https://github.com/novnc/noVNC/archive/refs/tags/v1.6.0.tar.gz"
+
+
+def step_remote_view():
+    """远程查看共享浏览器（/vnc、请用户接管）：默认用 Cloudflare 免费临时隧道，不需要任何配置。"""
+    cloudflared = shutil.which("cloudflared") or (str(BIN / "cloudflared") if (BIN / "cloudflared").exists() else None)
+    if cloudflared:
+        ok("cloudflared（Cloudflare 临时隧道）")
+    else:
+        warn("缺少 cloudflared")
+        arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(os.uname().machine, "amd64")
+        url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+        if ask(f"下载 cloudflared 到 {BIN}（不需要 sudo）？"):
+            BIN.mkdir(parents=True, exist_ok=True)
+            run(["curl", "-fsSL", "-o", str(BIN / "cloudflared"), url], capture=False)
+            (BIN / "cloudflared").chmod(0o755)
+    venv_ws = REPO / ".venv" / "bin" / "websockify"
+    if shutil.which("websockify") or venv_ws.exists():
+        ok("websockify")
+    else:
+        warn("缺少 websockify")
+        if ask("装到项目虚拟环境（pip install websockify）？"):
+            pip = REPO / ".venv" / "bin" / "pip"
+            run([str(pip) if pip.exists() else which("uv") or "pip", *([] if pip.exists() else ["pip"]),
+                 "install", *(["--python", str(REPO / ".venv" / "bin" / "python")] if not pip.exists() else []),
+                 "websockify"], capture=False)
+    if (NOVNC_DIR / "vnc.html").exists() or Path("/usr/share/novnc/vnc.html").exists():
+        ok("noVNC 网页")
+    else:
+        warn("缺少 noVNC 网页")
+        if ask(f"下载 noVNC 到 {NOVNC_DIR}？"):
+            NOVNC_DIR.mkdir(parents=True, exist_ok=True)
+            run(f"curl -fsSL {NOVNC_TARBALL} | tar xz --strip-components=1 -C {shlex.quote(str(NOVNC_DIR))}",
+                shell=True, capture=False)
+
+
 def step_browser():
     """共享浏览器：Playwright MCP、Chromium、虚拟屏幕（Xvfb）、远程查看（x11vnc）、技能说明"""
     cli = PLAYWRIGHT_MCP / "node_modules" / "@playwright" / "mcp" / "cli.js"
@@ -521,6 +559,8 @@ def step_browser():
             cmd = package_install_command(missing)
             if cmd and ask(f"现在执行 `{cmd}`？（可能要求输入 sudo 密码）"):
                 run(cmd, shell=True, capture=False)
+    if not IS_MAC:
+        step_remote_view()
     skill = (TEMPLATES / "skills" / "shared-browser" / "SKILL.md").read_text()
     for root in (HOME / ".claude" / "skills", HOME / ".codex" / "skills"):
         if not root.parent.exists():

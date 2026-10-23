@@ -317,6 +317,26 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "项目外脑 recon/PROGRESS.md 会被先读入接续进度。", parse_mode=None)
 
 
+async def cmd_vnc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/vnc：打开共享浏览器的画面（这个项目的会话在用的那个；没有就给你一个空闲的，可以提前登录网站）。"""
+    if not auth_check(update.effective_user.id):
+        return
+    cwd = _update_cwd(update)
+    if not cwd:
+        await update.message.reply_text("请在项目 Thread 里使用 /vnc")
+        return
+    from src import browser_pool
+    waiting = await update.message.reply_text("🖥 正在打开共享浏览器的远程画面，约 10 秒…")
+    error = await browser_pool.open_for_user(update.message.message_thread_id, cwd)
+    try:
+        if error:
+            await waiting.edit_text(error)
+        else:
+            await waiting.delete()
+    except Exception:
+        pass
+
+
 async def cmd_abort(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/abort：中断当前回合，丢弃已发出但还没被处理的消息（CLI 排队的 + 桥接还没投递的相册）。"""
     if not auth_check(update.effective_user.id):
@@ -629,10 +649,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _issues_callback(query, context, data)
         return
 
-    if data.startswith("bh:"):  # 共享浏览器人工接管：我弄好了
+    if data.startswith("bh:"):  # 共享浏览器：接管的“我弄好了” / /vnc 的“关闭”
         from src import browser_pool
-        await query.answer("好的，通知会话继续")
-        await browser_pool.finish_help(data.split(":", 2)[2], "done")
+        _, action, help_id = data.split(":", 2)
+        await query.answer("好的，通知会话继续" if action == "done" else "已关闭")
+        await browser_pool.finish_help(help_id, "done" if action == "done" else "closed")
         return
 
     if data.startswith("lv:"):  # 状态告警按钮：看终端 / 中断
@@ -1859,6 +1880,7 @@ def create_app() -> Application:
             BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
             BotCommand("abort", "中断当前回合，丢弃还没处理的排队消息"),
             BotCommand("screen", "看当前项目终端的截图"),
+            BotCommand("vnc", "打开共享浏览器的远程画面（看 Agent 在干什么、提前登录网站）"),
             BotCommand("clear", "清空当前会话上下文（外脑会接续进度）"),
             BotCommand("new", "新建项目：/new 名字 [claude|codex]"),
             BotCommand("projects", "项目列表"),
@@ -1901,6 +1923,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("issues", cmd_issues))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("abort", cmd_abort))
+    app.add_handler(CommandHandler("vnc", cmd_vnc))
     app.add_handler(CommandHandler("screen", cmd_screen))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(TypeHandler(Update, _on_stopped_generation), group=-1)  # 草稿气泡的原生停止按钮
