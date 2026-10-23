@@ -20,6 +20,6 @@
 
 ## 用户要你配置 code-anywhere 的能力时（新机器 rollout 后最常见）
 用户只会用一句话提需求，你照对应手册一步步问、一步步做，不要让用户自己读文档：
-- “建立 VNC 通道”“配置远程查看 / 浏览器接管” → `docs/REMOTE-VIEW-SETUP.md`
+- 远程查看共享浏览器默认已可用（Cloudflare 临时隧道，`/vnc`）；用户要“用自己的隧道 / 中转机 / 固定地址” → `docs/REMOTE-VIEW-SETUP.md`；默认方式坏了先 `./setup --only browser`
 - “接 GitLab issue 流程” → 运行 `./setup --only gitlab`，按提示向用户要 GitLab 地址和令牌
 - 其他依赖、服务、规则缺失 → `./setup --check` 看缺什么，再 `./setup --only <步骤>` 修

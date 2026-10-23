@@ -1,6 +1,8 @@
-# 建立 VNC 通道（远程查看共享浏览器）——给 Agent 的执行手册
+# 自定义远程查看隧道——给 Agent 的执行手册
 
-用户在 code-anywhere 的 Thread 里说“建立 VNC 通道”“配置远程查看”之类的话时，照这份手册做。目标：`request_browser_help` 发出的 [🖥 打开浏览器] 按钮，用户在手机上点开就能操作共享浏览器。
+**默认不需要这份手册**：远程查看（`/vnc`、`request_browser_help`）默认经 Cloudflare 免费临时隧道送到手机，零配置（`./setup --only browser` 装好 cloudflared、websockify、noVNC 即可）。`curl -s 127.0.0.1:5000/browser/status` 的 `mode` 为 `cloudflare` 就是这种。
+
+只有用户明确要用自己的隧道（例如 Cloudflare 被公司网络挡住、要固定地址、要走自己的中转机）时，才照下面做。配了 `BROWSER_HELP_*` 就会覆盖默认方式；删掉这些配置并重启服务即回到默认。
 
 原则：一次只问一个问题，用户不懂的名词换成大白话；能自己查的不问；改别的机器之前先说清楚要改什么，等用户同意。
 

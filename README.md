@@ -32,9 +32,7 @@ cd ~/workspace/code-anywhere && ./setup
 
 **4. 开始用**：在和 bot 的私聊里发 `/new code-anywhere`，打开它自己的 Thread；新项目发 `/new 项目名`（加 `codex` 用 Codex）。
 
-**5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**：
-- “建立 VNC 通道” —— 需要登录时可以在手机上接管共享浏览器
-- “接 GitLab issue 流程” —— 在 TG 里提需求、验收
+**5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**，比如“接 GitLab issue 流程”（在 TG 里提需求、验收）、“用自己的隧道做远程查看”。
 
 它会问你需要的东西，然后帮你配好。
 
@@ -59,6 +57,7 @@ cd ~/workspace/code-anywhere && ./setup
 |---|---|
 | `/new 名字` | 在服务器上建项目目录 + 话题并启动 CLI，全程不用登录服务器 |
 | `/screen` | 当前项目终端的截图（保留排版和颜色） |
+| `/vnc` | 打开共享浏览器的画面：看 Agent 在浏览器里干什么，或提前登录网站（所有项目共用登录状态） |
 | `/abort` | 中断正在跑的回合，并丢弃已发出但还没处理的排队消息（会把丢弃的原文回给你） |
 | `/model` | 查看当前模型；`/model list` 列出全部；`/model claude sonnet high full` 一句切换引擎、模型、effort、权限，历史不丢 |
 | `/permissions` | Codex 权限：`full` / `workspace` / `read-only` |
@@ -92,7 +91,9 @@ cd ~/workspace/code-anywhere && ./setup
 
 所有会话共用一个浏览器池（默认 2 个槽位，有界面，跑在虚拟屏幕里），通过 `browser` MCP 提供官方 Playwright MCP 的全部能力。每个会话第一次用浏览器时自动分到一个独占槽位，空闲 10 分钟自动归还；所有项目共用一个登录身份。
 
-遇到登录、SSO、二次验证、验证码时，Agent 调用 `request_browser_help`，你在它的 Thread 里收到 **[🖥 打开浏览器] [✅ 我弄好了]**：点开就在手机上通过 noVNC 直接操作同一个浏览器，密码只由你自己输入，模型看不到。远程查看用时临时启动（本机 x11vnc → ssh 反向隧道 → 手机能访问的中转机上临时起 noVNC），点“我弄好了”或 15 分钟超时后全部停掉。配置见 `.env.example` 的 `BROWSER_HELP_*`；`./setup` 会安装 Playwright MCP、Chromium、Xvfb/x11vnc，注册 MCP 并安装技能 `shared-browser`。目前只支持 Linux。
+遇到登录、SSO、二次验证、验证码时，Agent 调用 `request_browser_help`，你在它的 Thread 里收到 **[🖥 打开浏览器] [✅ 我弄好了]**：点开就在手机上通过 noVNC 直接操作同一个浏览器，密码只由你自己输入，模型看不到。你也可以随时发 `/vnc` 打开画面。
+
+远程画面默认经 **Cloudflare 免费临时隧道**送到手机（`https://….trycloudflare.com`，不用注册、不用配置），用完即关、地址作废，画面还有一次性密码。想走自己的隧道（中转机或公网地址），在 code-anywhere 的 Thread 里说一声即可（Agent 手册：`docs/REMOTE-VIEW-SETUP.md`）。目前只支持 Linux。
 
 ### 用 GitLab issue 管理反馈
 

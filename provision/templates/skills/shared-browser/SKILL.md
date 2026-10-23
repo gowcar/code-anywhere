@@ -22,6 +22,7 @@ description: 用 code-anywhere 共享浏览器（browser MCP，Playwright 全部
 3. 用户会在你所在的 TG Thread 里看到 [🖥 打开浏览器] [✅ 我弄好了]，然后在手机上直接操作同一个浏览器。用户操作期间，你的浏览器调用会暂停等待，这是正常的。
 4. 用户点“我弄好了”，或者 15 分钟超时后，你会收到一条 code-anywhere 发来的消息。也可以用 `browser_help_status(help_id)` 查询状态。收到后先 `browser_snapshot` 确认结果，再继续。
 5. 超时或用户没弄好时，不要反复请求轰炸。用一句话说明卡在哪里，等用户回复。
+6. 用户自己也可以随时在 Thread 里发 `/vnc` 看浏览器画面；如果用户说“我已经在浏览器里登录好了”，直接继续，不必再请求。
 
 ## 规矩
 
@@ -29,4 +30,4 @@ description: 用 code-anywhere 共享浏览器（browser MCP，Playwright 全部
 - 截图可能拍到敏感信息（令牌、个人信息），只截任务需要的部分，不要把截图贴到 issue 或公开的地方。
 - 不要在共享浏览器里退出登录、清 cookie、改浏览器设置，这些会影响所有会话。
 - 不要关闭共享浏览器本身。只关你自己打开、已经不用的标签页。
-- 返回 `unavailable` 表示这台机器没有配置远程查看，告诉用户需要去终端处理，或者跳过这一步。
+- 返回 `unavailable` 表示这台机器缺远程查看组件，告诉用户在 code-anywhere 的 Thread 里说一声修好（`./setup --only browser`）。
