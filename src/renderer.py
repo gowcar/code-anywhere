@@ -6,6 +6,7 @@ Telegram 支持的 HTML 标签：
 """
 
 import html
+from pathlib import Path
 import re
 import logging
 
@@ -221,6 +222,41 @@ def format_tool_use(tool_name: str, tool_input: dict) -> str:
         import json as _json
         summary = _json.dumps(tool_input, ensure_ascii=False)[:80]
         return f"{icon} {tool_name}: <code>{html.escape(summary)}</code>"
+
+
+def tool_card_line(tool_name: str, tool_input: dict, width: int = 26) -> str:
+    """状态卡里的一行“在干什么”（HTML）：手机上一行放得下，优先用工具自带的说明。
+    命令原文前面的 cd 前缀、长路径都没有信息量，在手机上一条要折三行（2026-10-23 用户反馈）。"""
+    import re as _re
+
+    def cut(text: str) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= width else text[:width - 1] + "…"
+
+    name = tool_name.lower()
+    short = tool_name.split("__")[-1]
+    if name in ("bash", "shell", "exec_command", "local_shell"):
+        cmd = tool_input.get("command", "")
+        if isinstance(cmd, list):
+            cmd = " ".join(map(str, cmd[-1:] if cmd[:2] in (["bash", "-lc"], ["bash", "-c"]) else cmd))
+        if tool_input.get("description"):
+            return f"⚡ {html.escape(cut(tool_input['description']))}"
+        cmd = _re.sub(r"^\s*cd\s+\S+\s*(;|&&)\s*", "", str(cmd))
+        return f"⚡ <code>{html.escape(cut(cmd.splitlines()[0] if cmd else ''))}</code>"
+    if name in ("read", "edit", "write", "multiedit", "notebookedit"):
+        verb = {"read": "读", "write": "写"}.get(name, "改")
+        path = str(tool_input.get("file_path", tool_input.get("filePath", "")))
+        return f"{'📖' if name == 'read' else '✏️'} {verb} <code>{html.escape(cut(Path(path).name or path))}</code>"
+    if name in ("glob", "grep"):
+        return f"🔎 搜 <code>{html.escape(cut(str(tool_input.get('pattern', ''))))}</code>"
+    if name in ("websearch", "webfetch"):
+        return f"🌐 {html.escape(cut(str(tool_input.get('query') or tool_input.get('url') or '')))}"
+    if name in ("task", "agent"):
+        return f"🤖 {html.escape(cut(str(tool_input.get('description') or '子任务')))}"
+    if short.startswith("browser_"):
+        target = tool_input.get("url") or tool_input.get("element") or tool_input.get("text") or ""
+        return f"🖥 {html.escape(cut(short[8:] + (' ' + str(target) if target else '')))}"
+    return f"🔧 {html.escape(cut(short))}"
 
 
 async def send_ephemeral(bot, chat_id: int, text: str, ttl: float = 5.0,

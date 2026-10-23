@@ -913,7 +913,8 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                     if abs_p:
                                         tool_use_image_paths[tid] = abs_p
                                 desc = format_tool_use(tname, tinput)
-                                if not await liveness.on_tool(topic_id, desc):  # 进状态卡滚动显示
+                                from src.renderer import tool_card_line
+                                if not await liveness.on_tool(topic_id, tool_card_line(tname, tinput)):  # 进状态卡
                                     await send_ephemeral(
                                         _bot, chat_id,
                                         desc,

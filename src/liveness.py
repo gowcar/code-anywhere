@@ -178,6 +178,7 @@ class Topic:
 _topics: dict[int, Topic] = {}
 _activity: dict[int, int] = {}          # 话题里“正式消息”计数：卡片之后出现新消息就挪到底部
 _last_tool: dict[int, deque] = {}       # 每个话题最近几条工具动作 (描述, 时间)
+_tool_count: dict[int, int] = {}         # 这一轮第几步
 _monitor: "Monitor | None" = None
 _names: dict[str, dict] | None = None
 
@@ -214,8 +215,9 @@ def note_activity(topic_id: int) -> None:
 
 
 def note_tool(topic_id: int, description: str) -> None:
-    plain = html.unescape(re.sub(r"<[^>]+>", "", description)).replace("\n", " ").strip()
-    _last_tool.setdefault(topic_id, deque(maxlen=TOOL_LINES)).append((plain[:70], time.time()))
+    """description 是渲染好的一行 HTML（renderer.tool_card_line），卡片里原样显示最新一条。"""
+    _last_tool.setdefault(topic_id, deque(maxlen=TOOL_LINES)).append((description.replace("\n", " ").strip(), time.time()))
+    _tool_count[topic_id] = _tool_count.get(topic_id, 0) + 1
 
 
 async def on_tool(topic_id: int, description: str) -> bool:
@@ -273,19 +275,18 @@ def card_text(topic: Topic, now: float, live: bool = False) -> str:
     spinner = SPINNER[topic.frame % len(SPINNER)]
     head = {"running": f"{spinner} 运行中", "retrying": "🔁 接口重试中", "stalled": "⚠️ 疑似卡住",
             "waiting": "🟡 等你审批或回答"}.get(topic.state, f"{spinner} 运行中")
-    # 以 HTML 发送：工具行放进 <code>，否则 Telegram 会把 /home/... 这类路径识别成蓝色的 bot 命令链接
-    lines = [f"{head} · {html.escape(took)}"]
-    facts = [x for x in (f"{snap.tokens} tokens" if snap.tokens else "", f"上下文{snap.context}" if snap.context else "") if x]
-    if facts:
-        lines.append(html.escape(" · ".join(facts)))
+    # 收成两行（2026-10-23 用户：卡片太高、不怎么动）：第一行状态与用量，第二行最新一步在干什么。
+    # 以 HTML 发送：命令放进 <code>，否则 Telegram 会把 /home/... 这类路径识别成蓝色的 bot 命令链接
+    facts = [x for x in (snap.tokens.replace(" tokens", "") if snap.tokens else "",
+                         f"上下文{snap.context}" if snap.context else "") if x]
+    lines = [html.escape(" · ".join([f"{head} · {took}", *facts]))]
     if topic.state in ("retrying", "stalled"):
         quiet = human_elapsed(now - topic.last_progress)
         lines.append(html.escape(f"{quiet}无进展" + (f"：{snap.detail}" if snap.detail else "")))
     if tools := _last_tool.get(topic.topic_id):
-        lines.append("")
-        for desc, at in tools:
-            icon, _, rest = desc.partition(" ")
-            lines.append(f"{html.escape(icon)} <code>{html.escape(rest or icon)}</code> · {human_elapsed(now - at)}前")
+        desc, at = tools[-1]
+        step = _tool_count.get(topic.topic_id, len(tools))
+        lines.append(f"{desc} · 第{step}步 · {human_elapsed(now - at)}前")
     return "\n".join(lines)
 
 
@@ -433,6 +434,7 @@ class Monitor:
         if topic.state == "idle":
             topic.turn_started = None
             _last_tool.pop(topic.topic_id, None)
+            _tool_count.pop(topic.topic_id, None)
             for message_id in _user_msgs.pop(topic.topic_id, []):  # 这一轮做完：👀 → 👌
                 await react(self.bot, self.chat_id, message_id, "👌")
             if topic.card_id:  # 正常结束：回答本身已说明完成，卡片删掉

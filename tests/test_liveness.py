@@ -87,12 +87,23 @@ class MonitorTests(unittest.TestCase):
         topic = asyncio.run(scenario())
         self.assertEqual(len(self.bot.sent), 1)                    # 第一条工具调用立刻出卡片
         self.assertEqual(topic.state, "running")
-        self.assertEqual([d for d, _ in liveness._last_tool[7]], [f"⚡ step {i}" for i in range(2, 6)])
         self.assertIn("⚡ <code>step 0</code>", self.bot.sent[0]["text"])
         self.assertEqual(self.bot.sent[0]["parse_mode"], "HTML")      # 路径不会被识别成 bot 命令链接
         text = liveness.card_text(topic, 2001.0)
         self.assertTrue(text.splitlines()[0][0] in liveness.SPINNER)
-        self.assertEqual(text.count("⚡ <code>step"), 4)            # 只滚动显示最近 4 条
+        # 收成两行：状态一行，最新一步一行（带第几步），不再列历史
+        self.assertEqual(len(text.splitlines()), 2)
+        self.assertIn("⚡ <code>step 5</code> · 第6步", text)
+        self.assertNotIn("step 4", text)
+
+    def test_tool_card_line_is_short_and_meaningful(self):
+        from src.renderer import tool_card_line
+        self.assertEqual(tool_card_line("Bash", {"command": "cd /x; ls", "description": "List files"}), "⚡ List files")
+        self.assertEqual(tool_card_line("Bash", {"command": "cd /home/toc/SSE/workspace/code-anywhere; git status -s"}),
+                         "⚡ <code>git status -s</code>")
+        self.assertEqual(tool_card_line("Read", {"file_path": "/a/b/src/liveness.py"}), "📖 读 <code>liveness.py</code>")
+        self.assertTrue(tool_card_line("Bash", {"command": "x" * 80}).endswith("…</code>"))
+        self.assertEqual(tool_card_line("mcp__browser__browser_navigate", {"url": "https://a.io"}), "🖥 navigate https://a.io")
 
     def test_concurrent_updates_send_only_one_card(self):
         async def scenario():
@@ -281,10 +292,11 @@ class TextTests(unittest.TestCase):
         self.assertTrue(long_title.endswith(" 🟢") and len(long_title) <= liveness.TITLE_MAX + 2)
         self.assertEqual(liveness.titled("digital-buddy-seatalk", "running"), "digital-b…-seatalk 🟢")
 
-    def test_tool_note_is_plain_text(self):
+    def test_tool_note_keeps_rendered_html_single_line(self):
+        # 卡片以 HTML 发送，命令要留在 <code> 里（否则路径会被识别成 bot 命令）；只去掉换行
         with patch.dict(liveness._last_tool, {}, clear=True):
-            liveness.note_tool(3, "⚡ <code>git status &amp;&amp; ls</code>")
-            self.assertEqual(liveness._last_tool[3][-1][0], "⚡ git status && ls")
+            liveness.note_tool(3, "⚡ <code>git status &amp;&amp;\nls</code>")
+            self.assertEqual(liveness._last_tool[3][-1][0], "⚡ <code>git status &amp;&amp; ls</code>")
 
 
 if __name__ == "__main__":
