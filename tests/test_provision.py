@@ -62,6 +62,20 @@ class GroupMessageTests(unittest.TestCase):
             self.assertEqual(setup.check_group("t", 9, 1), [])
 
 
+class AvatarTests(unittest.TestCase):
+    def test_new_bot_gets_avatar_existing_left_alone(self):
+        from unittest.mock import patch
+        with patch.object(setup, "tg", return_value={"total_count": 0}), patch.object(setup, "ask", return_value=True), \
+             patch.object(setup, "tg_upload", return_value=True) as upload:
+            setup.ensure_avatar("t", {"id": 1})
+        self.assertEqual(upload.call_args.args[1], "setMyProfilePhoto")
+        self.assertEqual(upload.call_args.kwargs["photo"], {"type": "static", "photo": "attach://avatar"})
+        with patch.object(setup, "tg", return_value={"total_count": 1}), patch.object(setup, "tg_upload") as upload:
+            setup.ensure_avatar("t", {"id": 1})
+        upload.assert_not_called()
+        self.assertTrue(setup.AVATAR.exists())
+
+
 class RenderTests(unittest.TestCase):
     def test_service_unit_has_no_placeholders(self):
         unit = setup.render("code-anywhere.service", REPO="/r", PATH="/p")

@@ -166,6 +166,50 @@ def tg(token: str, method: str, http_timeout: int = 20, **params) -> dict:
         raise TgError(exc.code, body.get("description", str(exc))) from None
 
 
+AVATAR = REPO / "assets" / "avatar.jpg"
+
+
+def tg_upload(token: str, method: str, files: dict[str, Path], **params) -> dict:
+    """带文件的 Bot API 调用（multipart/form-data）。"""
+    boundary = "----code-anywhere-" + os.urandom(8).hex()
+    body = io.BytesIO()
+    for key, value in params.items():
+        value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+        body.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode())
+    for key, path in files.items():
+        body.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"; filename=\"{path.name}\"\r\n"
+                   f"Content-Type: image/jpeg\r\n\r\n".encode())
+        body.write(path.read_bytes())
+        body.write(b"\r\n")
+    body.write(f"--{boundary}--\r\n".encode())
+    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}", data=body.getvalue(),
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)["result"]
+    except urllib.error.HTTPError as exc:
+        body_json = json.loads(exc.read() or b"{}")
+        raise TgError(exc.code, body_json.get("description", str(exc))) from None
+
+
+def ensure_avatar(token: str, me: dict) -> None:
+    """新 bot 没有头像时换上 Code Anywhere 的头像（assets/avatar.jpg）；已有头像不动。"""
+    try:
+        if tg(token, "getUserProfilePhotos", user_id=me["id"], limit=1).get("total_count"):
+            ok("bot 已有头像")
+            return
+    except TgError:
+        return
+    warn("bot 还没有头像")
+    if AVATAR.exists() and ask("换上 Code Anywhere 的头像？"):
+        try:
+            tg_upload(token, "setMyProfilePhoto", {"avatar": AVATAR},
+                      photo={"type": "static", "photo": "attach://avatar"})
+            ok("头像已设置（客户端可能要过一会儿才刷新）")
+        except TgError as exc:
+            info(f"自动设置失败（{exc}）：可以在 @BotFather 发 /setuserpic，上传 {AVATAR}")
+
+
 THREADED_MODE_HINT = "在 @BotFather 发 /mybots → 选你的 bot → Bot Settings → Threaded Mode → 打开"
 
 
@@ -390,6 +434,7 @@ def step_telegram():
             if chat_id:
                 missing = check_group(token, int(chat_id), me["id"])
                 if not missing:
+                    ensure_avatar(token, me)
                     ok(f"@{me['username']} 已就绪，" + ("私聊 Thread 模式" if int(chat_id) > 0 else f"群组 {chat_id}"))
                     return
                 warn("；".join(missing))
@@ -415,6 +460,7 @@ def step_telegram():
     else:
         me = tg(token, "getMe")
     ok(f"bot 有效：@{me['username']}")
+    ensure_avatar(token, me)
     info("接下来（私聊 Thread 模式，推荐）：")
     info(f"  1) {THREADED_MODE_HINT}")
     info(f"  2) 打开和 @{me['username']} 的私聊，随便发一句话（比如 hello）")
