@@ -10,7 +10,7 @@ from pathlib import Path
 from src.session_mcp import caller_processes
 
 PLAYWRIGHT_MCP = Path(os.getenv("PLAYWRIGHT_MCP_DIR", str(Path.home() / ".local/share/code-anywhere/playwright-mcp")))
-PORT = int(os.getenv("BOT_PORT", "5000"))
+from src.config import BOT_PORT as PORT   # 读 config.env
 
 
 def main() -> None:

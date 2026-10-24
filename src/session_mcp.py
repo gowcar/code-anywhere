@@ -8,7 +8,8 @@ import aiohttp
 from src.stdio_mcp import StdioMCP
 
 mcp = StdioMCP('code-anywhere-sessions')
-BASE = f"http://127.0.0.1:{int(os.getenv('BOT_PORT', '5000'))}/agent/sessions"
+from src.config import BOT_PORT   # 读 config.env：CLI 拉起的 MCP 进程看不到桥接的环境变量
+BASE = f"http://127.0.0.1:{BOT_PORT}/agent/sessions"
 
 
 def caller_processes():

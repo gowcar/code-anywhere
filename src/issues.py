@@ -24,6 +24,10 @@ PLATFORM_FILE = Path.home() / ".config" / "code-anywhere" / "issue-platform"   #
 GITLAB_HOST_FILE = Path.home() / ".config" / "code-anywhere" / "gitlab-host"
 
 
+def _gitlab_token() -> str:
+    return (os.getenv("GITLAB_TOKEN") or TOKEN_FILE.read_text()).strip()
+
+
 def gitlab_host() -> str:
     """GitLab 域名：环境变量 GITLAB_HOST，否则配置 issue 流程时记下的；没有就报错，不猜。"""
     host = os.getenv("GITLAB_HOST", "").strip()
@@ -50,7 +54,7 @@ def platform_name() -> str:
 def remote_configured() -> bool:
     if platform() == "github":
         return bool(_github_token())
-    return TOKEN_FILE.exists() and (bool(os.getenv("GITLAB_HOST")) or GITLAB_HOST_FILE.exists())
+    return (bool(os.getenv("GITLAB_TOKEN")) or TOKEN_FILE.exists()) and (bool(os.getenv("GITLAB_HOST")) or GITLAB_HOST_FILE.exists())
 
 
 def configured() -> bool:
@@ -62,8 +66,10 @@ def configured() -> bool:
 
 
 def _github_token() -> str:
+    if os.getenv("GITHUB_TOKEN"):
+        return os.getenv("GITHUB_TOKEN").strip()
     if GITHUB_TOKEN_FILE.exists():
-        return GITHUB_TOKEN_FILE.read_text().strip()
+        return GITHUB__gitlab_token()
     import shutil
     import subprocess
     gh = shutil.which("gh") or str(Path.home() / ".local/bin/gh")
@@ -173,7 +179,7 @@ def _remote_open_issues(host: str | None = None) -> list[dict]:
     if platform() == "github":
         return _gh_fetch_open()
     host = host or gitlab_host()
-    token = TOKEN_FILE.read_text().strip()
+    token = _gitlab_token()
     issues, page = [], 1
     while True:
         batch = _get(host, token, "issues", scope="created_by_me", state="opened", per_page=100, page=page)
@@ -190,7 +196,7 @@ def _remote_open_issues(host: str | None = None) -> list[dict]:
 
 def _write(method: str, path: str, host: str | None = None, **params) -> dict:
     host = host or gitlab_host()
-    token = TOKEN_FILE.read_text().strip()
+    token = _gitlab_token()
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(f"https://{host}/api/v4/{path}", data=data, method=method,
                                  headers={"PRIVATE-TOKEN": token})
@@ -203,7 +209,7 @@ def _remote_get_issue(project_id: int, iid: int) -> dict:
         full = _gh_full(project_id)
         return _gh_normalize(_gh("GET", f"repos/{full}/issues/{iid}"), full)
     host = gitlab_host()
-    return _get(host, TOKEN_FILE.read_text().strip(), f"projects/{project_id}/issues/{iid}")
+    return _get(host, _gitlab_token(), f"projects/{project_id}/issues/{iid}")
 
 
 def _remote_note(project_id: int, iid: int, body: str) -> None:

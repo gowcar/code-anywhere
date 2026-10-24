@@ -187,7 +187,7 @@ def _model_status(cwd: str) -> str:
             "全部选项：<code>/model list</code>")
 
 
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "workspace")))
+WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "workspace"))).expanduser()
 
 
 async def create_project(bot, chat_id: int, name: str, path: Path, engine: str, intro: str = "") -> int:

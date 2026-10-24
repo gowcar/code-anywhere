@@ -5,7 +5,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# 所有配置与密钥在 ~/.config/code-anywhere/config.env（./setup 生成，权限 600）；
+# 仓库里的 .env 是旧位置，只补充配置文件里没有的项（兼容早期安装）
+CONFIG_FILE = Path(os.getenv("CODE_ANYWHERE_CONFIG", str(Path.home() / ".config" / "code-anywhere" / "config.env")))
+load_dotenv(CONFIG_FILE)
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Telegram
 BOT_TOKEN = os.getenv("BOT_TOKEN")

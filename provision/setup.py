@@ -28,7 +28,8 @@ REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "provision" / "templates"
 HOME = Path.home()
 BIN = HOME / ".local" / "bin"
-ENV_FILE = REPO / ".env"
+CONFIG_FILE = Path(os.getenv("CODE_ANYWHERE_CONFIG", str(Path.home() / ".config" / "code-anywhere" / "config.env")))
+LEGACY_ENV = REPO / ".env"   # 旧位置：只读，合并进 CONFIG_FILE
 MCP_CMD = str(REPO / "scripts" / "session-mcp")
 BROWSER_MCP_CMD = str(REPO / "scripts" / "browser-mcp")
 PLAYWRIGHT_MCP = HOME / ".local" / "share" / "code-anywhere" / "playwright-mcp"
@@ -101,6 +102,13 @@ def read_env(path: Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
     return values
+
+
+def read_config() -> dict[str, str]:
+    """配置文件为准；旧的仓库 .env 只补充配置文件里没有（或为空）的项。"""
+    merged = {k: v for k, v in read_env(LEGACY_ENV).items() if v}
+    merged.update({k: v for k, v in read_env(CONFIG_FILE).items() if v})
+    return merged
 
 
 def update_env(text: str, updates: dict[str, str]) -> str:
@@ -412,35 +420,70 @@ def step_cli_auth():
             logged_in = json.loads(status[status.index("{"):]).get("loggedIn")
         except ValueError:
             logged_in = False
-        if logged_in or read_env(ENV_FILE).get("ANTHROPIC_API_KEY"):
+        if logged_in or read_config().get("ANTHROPIC_API_KEY"):
             ok("Claude 已登录")
         else:
             warn("Claude 未登录")
-            info("任选其一：在终端运行 `claude auth login`；或在下面填 API Key（存进 .env，权限 600）")
+            info(f"任选其一：在终端运行 `claude auth login`；或在下面填 API Key（存进 {CONFIG_FILE}）")
+            info("用自建网关 / 第三方服务的，留空跳过，之后在配置文件里填 ANTHROPIC_BASE_URL 和令牌")
             if not CHECK_ONLY:
                 key = prompt("ANTHROPIC_API_KEY（留空跳过）", secret=True)
                 if key:
                     write_env({"ANTHROPIC_API_KEY": key})
-                    ok("已写入 .env")
+                    ok("已写入配置文件")
     if which("codex"):
         config = HOME / ".codex" / "config.toml"
         logged = "Logged in" in (run([which("codex"), "login", "status"]).stdout or "")
-        if logged or (config.exists() and "model_provider" in config.read_text()):
+        if logged or (config.exists() and "model_provider" in config.read_text()) or read_config().get("OPENAI_API_KEY"):
             ok("Codex 已登录或已配置网关")
         else:
-            warn("Codex 未登录：在终端运行 `codex login`（只用 Claude 可忽略）")
+            warn("Codex 未登录（只用 Claude 可忽略）")
+            info(f"任选其一：在终端运行 `codex login`；或在下面填 OpenAI API Key（存进 {CONFIG_FILE}）")
+            if not CHECK_ONLY:
+                key = prompt("OPENAI_API_KEY（留空跳过）", secret=True)
+                if key:
+                    write_env({"OPENAI_API_KEY": key})
+                    ok("已写入配置文件")
+
+
+def ensure_config() -> None:
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(TEMPLATES / "config.env", CONFIG_FILE)
+    CONFIG_FILE.chmod(0o600)
 
 
 def write_env(updates: dict[str, str]):
-    if not ENV_FILE.exists():
-        shutil.copy2(REPO / ".env.example", ENV_FILE)
-    ENV_FILE.write_text(update_env(ENV_FILE.read_text(), updates))
-    ENV_FILE.chmod(0o600)
+    """写进 ~/.config/code-anywhere/config.env（原地改值，注释和顺序保持不变）。"""
+    ensure_config()
+    CONFIG_FILE.write_text(update_env(CONFIG_FILE.read_text(), updates))
+    CONFIG_FILE.chmod(0o600)
+
+
+def step_config():
+    """配置文件 ~/.config/code-anywhere/config.env（所有密钥和设置都在这里，权限 600）"""
+    existed = CONFIG_FILE.exists()
+    legacy = {k: v for k, v in read_env(LEGACY_ENV).items() if v and v != "your_bot_token_here"}
+    current = read_env(CONFIG_FILE)
+    to_move = {k: v for k, v in legacy.items() if not current.get(k)}
+    if existed and not to_move:
+        ok(f"配置文件：{CONFIG_FILE}")
+        if CONFIG_FILE.stat().st_mode & 0o077 and not CHECK_ONLY:
+            CONFIG_FILE.chmod(0o600)
+        return
+    if CHECK_ONLY:
+        warn(f"配置文件{'需要合并旧的 .env' if existed else '还没有'}：{CONFIG_FILE}")
+        return
+    ensure_config()
+    if to_move:
+        write_env(to_move)
+        ok(f"已把仓库里旧的 .env 合并进配置文件（{len(to_move)} 项；旧文件保留未删）")
+    ok(f"配置文件：{CONFIG_FILE}（没填的项以后直接编辑它）")
 
 
 def step_telegram():
     """Telegram bot 与入口（默认私聊 Thread 模式：每个项目是和 bot 私聊里的一个 Thread）"""
-    env = read_env(ENV_FILE)
+    env = read_config()
     token, chat_id = env.get("BOT_TOKEN", ""), env.get("CHAT_ID", "")
     if token and token != "your_bot_token_here":
         try:
@@ -513,7 +556,7 @@ def step_telegram():
     allowed.add(str(found["user_id"]))
     write_env({"BOT_TOKEN": token, "CHAT_ID": str(found["chat_id"]),
                "ALLOWED_USERS": ",".join(sorted(allowed)), "BOT_PORT": env.get("BOT_PORT", "5000")})
-    ok(f".env 已写入（只允许 {', '.join(sorted(allowed))} 使用）")
+    ok(f"配置文件已写入（只允许 {', '.join(sorted(allowed))} 使用）")
 
 
 def step_hooks():
@@ -746,7 +789,7 @@ def step_service():
 
 def step_verify():
     """最终自检：服务健康 + 往 Telegram 发一条上线消息"""
-    env = read_env(ENV_FILE)
+    env = read_config()
     port = env.get("BOT_PORT", "5000")
     for _ in range(30):
         try:
@@ -768,7 +811,7 @@ def step_verify():
         ok("已发送，去 Telegram 看看")
 
 
-STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": step_cli_auth,
+STEPS = {"deps": step_deps, "python": step_python, "config": step_config, "tools": step_tools, "auth": step_cli_auth,
          "telegram": step_telegram, "hooks": step_hooks, "mcp": step_mcp, "browser": step_browser, "rules": step_rules,
          "issues": step_issues, "service": step_service, "verify": step_verify}
 

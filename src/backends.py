@@ -287,7 +287,8 @@ def _claude_settings_permission(cwd: str) -> str | None:
 
 def launch_env_args(backend: str) -> list[str]:
     """tmux 服务端环境里通常没有凭据，拉起 CLI 时用 -e 显式传入。"""
-    keys = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_HOME"}
+    keys = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"}   # 来自 config.env
     if backend == "codex":
         keys.update(codex_env_keys())
     args = []
