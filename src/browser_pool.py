@@ -537,7 +537,9 @@ def _novnc_web() -> str | None:
 
 def view_mode() -> str | None:
     """远程查看怎么连到手机：
-    - cloudflare（默认，零配置）：本机临时起 noVNC + Cloudflare 免费临时隧道，拿到一个 https://….trycloudflare.com 地址
+    - public（默认，零配置）：本机临时起 noVNC，经免费公共隧道拿到一个 https 地址。依次尝试
+      Cloudflare Quick Tunnel → localhost.run（ssh 22）→ Pinggy（ssh 443），第一个真正连通的为准
+      （有的网络挡了 Cloudflare 隧道用的 7844 端口，2026-10-24 在 Alan 的机器上实测）
     - relay：配了 BROWSER_HELP_SSH_HOST，经中转机转出去（自定义隧道）
     - direct：配了 BROWSER_HELP_PUBLIC_URL，手机能直接访问本机，noVNC 在本机对外监听（自定义）
     """
@@ -545,8 +547,8 @@ def view_mode() -> str | None:
         return "relay"
     if RELAY_PUBLIC_URL and RELAY_LISTEN and RELAY_WEBSOCKIFY:
         return "direct"
-    if _cloudflared() and _websockify() and _novnc_web():
-        return "cloudflare"
+    if _websockify() and _novnc_web() and (_cloudflared() or _which("ssh")):
+        return "public"
     return None
 
 
@@ -607,22 +609,76 @@ async def _relay(action: str) -> str:
     return out.decode(errors="replace").strip()
 
 
-async def _cloudflare_url(proc, timeout: float = 40) -> str:
-    """cloudflared 把临时地址打印在日志里（stderr）。"""
+TUNNELS = [t for t in os.getenv("BROWSER_TUNNELS", "cloudflare,localhost.run,pinggy").split(",") if t]
+
+
+def _tunnel_command(name: str, port: int) -> list[str] | None:
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+           "-o", f"UserKnownHostsFile={BASE / 'tunnel_known_hosts'}", "-o", "ServerAliveInterval=15",
+           "-o", "ExitOnForwardFailure=yes"]
+    if name == "cloudflare":
+        return [_cloudflared(), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"] if _cloudflared() else None
+    if not _which("ssh"):
+        return None
+    if name == "localhost.run":
+        return [*ssh, "-R", f"80:127.0.0.1:{port}", "nokey@localhost.run"]
+    if name == "pinggy":
+        return [*ssh, "-p", "443", "-R", f"0:127.0.0.1:{port}", "free@a.pinggy.io"]
+    return None
+
+
+TUNNEL_URL = {
+    "cloudflare": rb"https://[a-z0-9-]+\.trycloudflare\.com",
+    "localhost.run": rb"https://[a-z0-9-]+\.lhr\.life",
+    "pinggy": rb"https://[a-z0-9-]+\.(?:run\.pinggy-free\.link|free\.pinggy\.net)",
+}
+# Cloudflare 会先打印地址、再去连边缘节点；连不上时地址打得开却是 530，所以要等到“已注册连接”才算成功
+TUNNEL_READY = {"cloudflare": rb"Registered tunnel connection"}
+
+
+async def _tunnel_url(name: str, proc, timeout: float = 30) -> str:
     import re
-    deadline = time.time() + timeout
+    deadline, url = time.time() + timeout, None
+    ready = TUNNEL_READY.get(name)
     while time.time() < deadline:
-        line = await asyncio.wait_for(proc.stderr.readline(), max(0.1, deadline - time.time()))
+        try:
+            line = await asyncio.wait_for(proc.stdout.readline(), max(0.1, deadline - time.time()))
+        except asyncio.TimeoutError:
+            break
         if not line:
             break
-        found = re.search(rb"https://[a-z0-9-]+\.trycloudflare\.com", line)
-        if found:
-            async def drain():   # 继续读掉日志，避免管道写满卡住 cloudflared
-                while await proc.stderr.readline():
+        found = re.search(TUNNEL_URL[name], line)
+        url = url or (found.group(0).decode() if found else None)
+        if url and (not ready or re.search(ready, line)):
+            async def drain():   # 继续读掉输出，避免管道写满卡住隧道进程
+                while await proc.stdout.readline():
                     pass
             asyncio.create_task(drain())
-            return found.group(0).decode()
-    raise RuntimeError("Cloudflare 临时隧道没有给出地址（检查这台机器能否访问 Internet）")
+            return url
+    raise RuntimeError(f"{name} 隧道没有连通")
+
+
+async def _public_tunnel(item: dict, port: int) -> str:
+    """依次试免费公共隧道，返回第一个真正连通的地址；失败的进程随即结束。"""
+    errors = []
+    for name in TUNNELS:
+        cmd = _tunnel_command(name, port)
+        if not cmd:
+            continue
+        proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            url = await _tunnel_url(name, proc)
+        except Exception as exc:
+            errors.append(str(exc))
+            if proc.returncode is None:
+                proc.terminate()
+            continue
+        item["procs"].append(proc)
+        item["tunnel"] = name
+        log.info("[browser] 远程查看经 %s：%s", name, url)
+        return url
+    raise RuntimeError("免费公共隧道都没连通（" + "；".join(errors) + "）。可以在 code-anywhere 里说“用自己的隧道做远程查看”")
 
 
 async def _open_view(item: dict, slot: int) -> str:
@@ -647,7 +703,7 @@ async def _open_view(item: dict, slot: int) -> str:
         link = await asyncio.create_subprocess_exec(
             *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{target}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    else:                 # cloudflare：noVNC 只听本机，由临时隧道转出去
+    else:                 # public：noVNC 只听本机，由免费公共隧道转出去
         link = await asyncio.create_subprocess_exec(
             _websockify(), "--web", _novnc_web(), f"127.0.0.1:{view_port(slot)}", f"127.0.0.1:{target}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -661,11 +717,7 @@ async def _open_view(item: dict, slot: int) -> str:
         return RELAY_PUBLIC_URL
     if mode == "direct":
         return RELAY_PUBLIC_URL
-    tunnel = await asyncio.create_subprocess_exec(
-        _cloudflared(), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{view_port(slot)}",
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-    item["procs"].append(tunnel)
-    return await _cloudflare_url(tunnel)
+    return await _public_tunnel(item, view_port(slot))
 
 
 async def _start_item(kind: str, slot: int, topic: int, reason: str, **extra) -> tuple[str, dict]:

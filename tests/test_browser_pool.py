@@ -86,23 +86,52 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
              patch.object(pool, "_cloudflared", return_value="/bin/cloudflared"), \
              patch.object(pool, "_websockify", return_value="/bin/websockify"), \
              patch.object(pool, "_novnc_web", return_value="/usr/share/novnc"):
-            self.assertEqual(pool.view_mode(), "cloudflare")
+            self.assertEqual(pool.view_mode(), "public")
             with patch.object(pool, "RELAY_PUBLIC_URL", "https://me:1"), patch.object(pool, "RELAY_LISTEN", "0.0.0.0:1"), \
                  patch.object(pool, "RELAY_WEBSOCKIFY", "websockify"):
                 self.assertEqual(pool.view_mode(), "direct")
         with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_PUBLIC_URL", ""), \
-             patch.object(pool, "_cloudflared", return_value=None):
+             patch.object(pool, "_cloudflared", return_value=None), patch.object(pool, "_which", return_value=None):
             self.assertIsNone(pool.view_mode())
 
-    async def test_cloudflare_url_is_read_from_log(self):
-        lines = [b"INF Requesting new quick Tunnel\n",
-                 b"INF |  https://abc-def-123.trycloudflare.com  |\n", b""]
-        class Stream:
-            async def readline(self):
-                return lines.pop(0) if lines else b""
+    async def test_cloudflare_waits_for_registered_connection(self):
+        def proc_with(lines):
+            class Stream:
+                async def readline(self):
+                    return lines.pop(0) if lines else b""
+            class Proc:
+                stdout = Stream()
+            return Proc()
+        ok = proc_with([b"INF |  https://abc-def-123.trycloudflare.com  |\n",
+                        b"INF Registered tunnel connection connIndex=0\n"])
+        self.assertEqual(await pool._tunnel_url("cloudflare", ok), "https://abc-def-123.trycloudflare.com")
+        # 打印了地址但边缘节点连不上（Alan 的网络）：不算成功
+        blocked = proc_with([b"INF |  https://abc-def-123.trycloudflare.com  |\n",
+                             b"ERR Failed to dial a quic connection\n"])
+        with self.assertRaises(RuntimeError):
+            await pool._tunnel_url("cloudflare", blocked)
+        lhr = proc_with([b"\x1b[7m qr \x1b[0m\n", b"4db43056404d9f.lhr.life tunneled with tls termination, https://4db43056404d9f.lhr.life\n"])
+        self.assertEqual(await pool._tunnel_url("localhost.run", lhr), "https://4db43056404d9f.lhr.life")
+
+    async def test_falls_back_to_next_tunnel(self):
+        tried = []
         class Proc:
-            stderr = Stream()
-        self.assertEqual(await pool._cloudflare_url(Proc()), "https://abc-def-123.trycloudflare.com")
+            returncode = None
+            stdout = None
+            def terminate(self): pass
+        async def fake_exec(*cmd, **kw):
+            tried.append(cmd[0])
+            return Proc()
+        async def fake_url(name, proc, timeout=30):
+            if name == "cloudflare":
+                raise RuntimeError("cloudflare 隧道没有连通")
+            return "https://x.lhr.life"
+        item = {"procs": []}
+        with patch.object(pool, "_cloudflared", return_value="cloudflared"), patch.object(pool, "_which", return_value="/usr/bin/ssh"), \
+             patch.object(pool.asyncio, "create_subprocess_exec", fake_exec), patch.object(pool, "_tunnel_url", fake_url):
+            self.assertEqual(await pool._public_tunnel(item, 6081), "https://x.lhr.life")
+        self.assertEqual(tried, ["cloudflared", "ssh"])
+        self.assertEqual(item["tunnel"], "localhost.run")
 
     def test_relay_script_saves_and_restores_existing_service(self):
         with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"), \
