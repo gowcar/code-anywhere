@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -47,6 +48,11 @@ RELAY_WEBSOCKIFY = os.getenv("BROWSER_HELP_WEBSOCKIFY", "")     # 起 noVNC 的�
 # 2026-10-23 实测恢复失败），所以要求配置一条确认能用的命令；不配置就只停不恢复，并在 TG 里说明
 RELAY_RESTORE = os.getenv("BROWSER_HELP_RESTORE", "")
 
+IS_MAC = sys.platform == "darwin"
+# macOS 没有 Xvfb：槽位直接在桌面上开有界面的 Chrome，远程查看转发系统自带的“屏幕共享”（整个桌面，
+# 连接时输入 Mac 登录密码）。用的时候才开隧道、用完就关（2026-10-24 用户确认可接受）
+MAC_SCREEN_SHARING_PORT = 5900
+
 _leases: dict[int, dict] = {}        # 槽位 → {client, session_id, cwd, since, conns, release_task}
 _last_used: dict[int, float] = {}
 _help: dict[str, dict] = {}          # 接管编号 → 状态
@@ -71,14 +77,21 @@ def unit(slot: int) -> str:
 
 
 def chrome_binary() -> str:
-    found = sorted((Path.home() / ".cache/ms-playwright").glob("chromium-*/chrome-linux*/chrome"))
+    caches = [Path.home() / ".cache/ms-playwright", Path.home() / "Library/Caches/ms-playwright"]
+    patterns = ["chromium-*/chrome-linux*/chrome",
+                "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
+                "chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"]
+    found = sorted(p for cache in caches for pattern in patterns for p in cache.glob(pattern))
     if found:
         return str(found[-1])
     for name in ("chromium", "chromium-browser", "google-chrome"):
         for folder in os.getenv("PATH", "").split(":"):
             if (Path(folder) / name).exists():
                 return str(Path(folder) / name)
-    raise RuntimeError("找不到 Chromium：请运行 npx playwright install chromium")
+    mac_chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    if mac_chrome.exists():
+        return str(mac_chrome)
+    raise RuntimeError("找不到 Chromium：请运行 ./setup --only browser")
 
 
 def gate(slot: int) -> asyncio.Event:
@@ -132,16 +145,24 @@ async def start_slot(slot: int) -> None:
     width, height = SCREEN.split("x")
     chrome = [chrome_binary(), f"--remote-debugging-port={cdp_port(slot)}", "--remote-debugging-address=127.0.0.1",
               f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
-              "--disable-dev-shm-usage", "--password-store=basic", "--window-position=0,0",
-              f"--window-size={width},{height}", "--start-maximized", "about:blank"]
-    script = (f"Xvfb :{display(slot)} -screen 0 {SCREEN}x24 -nolisten tcp -noreset & "
-              f"for i in $(seq 50); do [ -e /tmp/.X11-unix/X{display(slot)} ] && break; sleep 0.1; done; "
-              f"DISPLAY=:{display(slot)} exec {shlex.join(chrome)}")
-    await _run("systemctl", "--user", "reset-failed", unit(slot))
-    code, out = await _run("systemd-run", "--user", f"--unit={unit(slot)}", "--collect",
-                           "--property=KillMode=control-group", "/bin/bash", "-c", script)
-    if code != 0:
-        raise RuntimeError(f"启动浏览器槽位 {slot} 失败：{out.strip()}")
+              "--disable-dev-shm-usage", "--password-store=basic", f"--window-size={width},{height}"]
+    if IS_MAC:
+        # 独立会话启动，桥接重启不带走它（launchd 配了 AbandonProcessGroup）；pid 记下来，停止时用
+        chrome += [f"--window-position={40 * slot},{40 * slot}", "about:blank"]
+        log_file = open(BASE / f"slot-{slot}.log", "ab")
+        proc = await asyncio.create_subprocess_exec(*chrome, stdout=log_file, stderr=log_file,
+                                                    start_new_session=True)
+        (BASE / f"slot-{slot}.pid").write_text(str(proc.pid))
+    else:
+        chrome += ["--window-position=0,0", "--start-maximized", "about:blank"]
+        script = (f"Xvfb :{display(slot)} -screen 0 {SCREEN}x24 -nolisten tcp -noreset & "
+                  f"for i in $(seq 50); do [ -e /tmp/.X11-unix/X{display(slot)} ] && break; sleep 0.1; done; "
+                  f"DISPLAY=:{display(slot)} exec {shlex.join(chrome)}")
+        await _run("systemctl", "--user", "reset-failed", unit(slot))
+        code, out = await _run("systemd-run", "--user", f"--unit={unit(slot)}", "--collect",
+                               "--property=KillMode=control-group", "/bin/bash", "-c", script)
+        if code != 0:
+            raise RuntimeError(f"启动浏览器槽位 {slot} 失败：{out.strip()}")
     for _ in range(100):
         if await _version(slot):
             break
@@ -149,13 +170,21 @@ async def start_slot(slot: int) -> None:
     else:
         raise RuntimeError(f"浏览器槽位 {slot} 启动后 20 秒内没有响应")
     await import_identity(slot)
-    log.info("[browser] 槽位 %s 已启动 display=:%s cdp=%s", slot, display(slot), cdp_port(slot))
+    log.info("[browser] 槽位 %s 已启动 %s cdp=%s", slot, "桌面" if IS_MAC else f"display=:{display(slot)}", cdp_port(slot))
 
 
 async def stop_slot(slot: int) -> None:
     if await _version(slot):
         await export_identity(slot)
-    await _run("systemctl", "--user", "stop", unit(slot))
+    if IS_MAC:
+        pid_file = BASE / f"slot-{slot}.pid"
+        try:
+            os.kill(int(pid_file.read_text()), 15)
+        except (OSError, ValueError):
+            pass
+        pid_file.unlink(missing_ok=True)
+    else:
+        await _run("systemctl", "--user", "stop", unit(slot))
     log.info("[browser] 槽位 %s 已停止", slot)
 
 
@@ -599,27 +628,32 @@ async def _cloudflare_url(proc, timeout: float = 40) -> str:
 async def _open_view(item: dict, slot: int) -> str:
     """起 VNC 并把它送到手机能打开的地址，返回 noVNC 网页地址（不含参数）。进程记在 item["procs"]。"""
     mode = view_mode()
-    vnc = await asyncio.create_subprocess_exec(
-        "x11vnc", "-display", f":{display(slot)}", "-localhost", "-rfbport", str(vnc_port(slot)),
-        "-passwd", item["password"], "-forever", "-shared", "-noxdamage", "-quiet",
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    item["procs"].append(vnc)
+    if IS_MAC:   # 系统屏幕共享已经在 5900 上，不需要另起 VNC；一次性密码换成 Mac 登录密码
+        target = MAC_SCREEN_SHARING_PORT
+        vnc = None
+    else:
+        target = vnc_port(slot)
+        vnc = await asyncio.create_subprocess_exec(
+            "x11vnc", "-display", f":{display(slot)}", "-localhost", "-rfbport", str(target),
+            "-passwd", item["password"], "-forever", "-shared", "-noxdamage", "-quiet",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        item["procs"].append(vnc)
     if mode == "relay":   # 中转机：ssh 反向隧道 + 中转机上临时起 noVNC
         link = await asyncio.create_subprocess_exec(
             "ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15",
-            "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{vnc_port(slot)}", RELAY_HOST,
+            "-R", f"127.0.0.1:{RELAY_PORT}:127.0.0.1:{target}", RELAY_HOST,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     elif mode == "direct":
         link = await asyncio.create_subprocess_exec(
-            *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{vnc_port(slot)}",
+            *shlex.split(RELAY_WEBSOCKIFY), RELAY_LISTEN, f"127.0.0.1:{target}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     else:                 # cloudflare：noVNC 只听本机，由临时隧道转出去
         link = await asyncio.create_subprocess_exec(
-            _websockify(), "--web", _novnc_web(), f"127.0.0.1:{view_port(slot)}", f"127.0.0.1:{vnc_port(slot)}",
+            _websockify(), "--web", _novnc_web(), f"127.0.0.1:{view_port(slot)}", f"127.0.0.1:{target}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     item["procs"].append(link)
     await asyncio.sleep(2)
-    if link.returncode is not None or vnc.returncode is not None:
+    if link.returncode is not None or (vnc and vnc.returncode is not None):
         raise RuntimeError("本机 VNC 或 noVNC / 隧道没有起来")
     if mode == "relay":
         await _relay("start")
@@ -644,19 +678,20 @@ async def _start_item(kind: str, slot: int, topic: int, reason: str, **extra) ->
     _help[help_id] = item
     try:
         base = await _open_view(item, slot)
-        url = f"{base.rstrip('/')}/vnc.html?autoconnect=1&resize=scale&password={item['password']}"
+        url = f"{base.rstrip('/')}/vnc.html?autoconnect=1&resize=scale" + ("" if IS_MAC else f"&password={item['password']}")
+        mac_note = "\n连接时输入这台 Mac 的登录密码（看到的是整个桌面，浏览器在桌面上）。" if IS_MAC else ""
         minutes = HELP_TIMEOUT // 60
         if kind == "help":
             gate(slot).clear()
             buttons = [InlineKeyboardButton("🖥 打开浏览器", url=url),
                        InlineKeyboardButton("✅ 我弄好了", callback_data=f"bh:done:{help_id}", style="success")]
             text = (f"🖥 需要你在共享浏览器里操作：{item['reason']}\n\n点“打开浏览器”进入，弄好后点“我弄好了”。"
-                    f"链接 {minutes} 分钟内有效，期间会话暂停操作这个浏览器。")
+                    f"链接 {minutes} 分钟内有效，期间会话暂停操作这个浏览器。{mac_note}")
         else:
             buttons = [InlineKeyboardButton("🖥 打开浏览器", url=url),
                        InlineKeyboardButton("关闭", callback_data=f"bh:close:{help_id}", style="danger")]
             text = (f"🖥 共享浏览器（槽位 {slot}）：{item['reason']}\n\n点“打开浏览器”查看和操作，用完点“关闭”。"
-                    f"链接 {minutes} 分钟后自动失效。")
+                    f"链接 {minutes} 分钟后自动失效。{mac_note}")
         sent = await _bot.send_message(chat_id=config.CHAT_ID, message_thread_id=topic, parse_mode=None,
                                        reply_markup=InlineKeyboardMarkup([buttons]), text=text)
         item["message_id"] = sent.message_id

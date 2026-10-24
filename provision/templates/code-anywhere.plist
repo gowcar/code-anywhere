@@ -17,6 +17,8 @@
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- 共享浏览器在桌面上开的 Chrome 不随服务重启被杀（Linux 上由 systemd-run 独立运行） -->
+  <key>AbandonProcessGroup</key><true/>
   <key>StandardOutPath</key><string>{{REPO}}/logs/launchd.log</string>
   <key>StandardErrorPath</key><string>{{REPO}}/logs/launchd.log</string>
 </dict>

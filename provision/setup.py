@@ -550,11 +550,20 @@ def step_remote_view():
     else:
         warn("缺少 cloudflared")
         arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(os.uname().machine, "amd64")
-        url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
-        if ask(f"下载 cloudflared 到 {BIN}（不需要 sudo）？"):
-            BIN.mkdir(parents=True, exist_ok=True)
-            run(["curl", "-fsSL", "-o", str(BIN / "cloudflared"), url], capture=False)
-            (BIN / "cloudflared").chmod(0o755)
+        if IS_MAC and shutil.which("brew"):
+            if ask("用 Homebrew 安装 cloudflared？"):
+                run([shutil.which("brew"), "install", "cloudflared"], capture=False)
+        elif IS_MAC:
+            url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-{arch}.tgz"
+            if ask(f"下载 cloudflared 到 {BIN}？"):
+                BIN.mkdir(parents=True, exist_ok=True)
+                run(f"curl -fsSL {url} | tar xz -C {shlex.quote(str(BIN))}", shell=True, capture=False)
+        else:
+            url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+            if ask(f"下载 cloudflared 到 {BIN}（不需要 sudo）？"):
+                BIN.mkdir(parents=True, exist_ok=True)
+                run(["curl", "-fsSL", "-o", str(BIN / "cloudflared"), url], capture=False)
+                (BIN / "cloudflared").chmod(0o755)
     venv_ws = REPO / ".venv" / "bin" / "websockify"
     if shutil.which("websockify") or venv_ws.exists():
         ok("websockify")
@@ -588,7 +597,8 @@ def step_browser():
             PLAYWRIGHT_MCP.mkdir(parents=True, exist_ok=True)
             run([which("npm"), "install", "--prefix", str(PLAYWRIGHT_MCP), "--no-audit", "--no-fund",
                  f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}"], capture=False)
-    if list((HOME / ".cache" / "ms-playwright").glob("chromium-*/chrome-linux*/chrome")) or IS_MAC:
+    if list((HOME / ".cache" / "ms-playwright").glob("chromium-*/chrome-linux*/chrome")) or \
+            list((HOME / "Library" / "Caches" / "ms-playwright").glob("chromium-*/chrome-mac*")):
         ok("Chromium")
     elif (PLAYWRIGHT_MCP / "node_modules" / "playwright" / "cli.js").exists():
         warn("缺少 Chromium")
@@ -596,7 +606,12 @@ def step_browser():
             run([which("node"), str(PLAYWRIGHT_MCP / "node_modules" / "playwright" / "cli.js"), "install", "chromium"],
                 capture=False)
     if IS_MAC:
-        info("macOS 上暂不支持浏览器池的虚拟屏幕（Xvfb），共享浏览器先只在 Linux 上可用")
+        # macOS：浏览器开在真实桌面上，远程查看转发系统“屏幕共享”，需要它开着
+        if run(["nc", "-z", "-w", "2", "127.0.0.1", "5900"]).returncode == 0:
+            ok("屏幕共享已开启（远程查看用）")
+        else:
+            warn("屏幕共享没开：/vnc 和请你接管需要它")
+            info("系统设置 → 通用 → 共享 → 打开“屏幕共享”（只允许你自己的账号）")
     else:
         missing = [n for n, binary in (("xvfb", "Xvfb"), ("x11vnc", "x11vnc")) if not shutil.which(binary)]
         if not missing:
@@ -606,8 +621,7 @@ def step_browser():
             cmd = package_install_command(missing)
             if cmd and ask(f"现在执行 `{cmd}`？（可能要求输入 sudo 密码）"):
                 run(cmd, shell=True, capture=False)
-    if not IS_MAC:
-        step_remote_view()
+    step_remote_view()
     skill = (TEMPLATES / "skills" / "shared-browser" / "SKILL.md").read_text()
     for root in (HOME / ".claude" / "skills", HOME / ".codex" / "skills"):
         if not root.parent.exists():
