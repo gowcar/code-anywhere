@@ -25,3 +25,4 @@
 **2026-10-15 SMC效率建议汇总 🟢**：已分别向digital-buddy与digital-buddy-seatalk收集真实使用反馈，各14项；合并为发布闭环、Run Config Diff、SPEX doctor、readiness、RDS migration等18项并分P0/P1/P2，未执行平台写入或改变后台发布。资产 `docs/SMC-EFFICIENCY-FEEDBACK-20261015.md`。
 **2026-10-14 sdpcli运行版本核查 🟢**：execve确认调用登记v1.4.2的安装路径；二进制--version自报dev，不能当版本校验。注册表uploaded最新1.4.2/published1.4.0；实测无版本update退出0但降至published1.4.0；已指定@v1.4.2恢复并复核。证据 `recon/wiki/smc-version-verification.md`。
 **2026-10-14 浏览器资源约束 🟢**：用户授权操作前检查；已在两个workspace根AGENTS/CLAUDE追加规则，检查脚本 `scripts/browser-resource-check`（32进程/6GiB RSS/可用2GiB），阈值检查通过。只读约束非硬拦截，旧会话需读取才采用。清理后可用内存约9.7GiB。
+**2026-10-15 capacity失败可见性 🟢**：真实task_complete.error被丢弃，仅停止typing，TG无失败提示且/status一律绿色。用户已授权，已实现脱敏失败事件/持久通知回执、TG失败提示与/status和MCP状态；96项回归通过，systemd已部署，health正常/7会话，真实列表状态读取正常。下次真实失败TG通知待自然触发；未自动重跑。方案 `docs/CODEX-FAILURE-VISIBILITY-20261015.md`。
