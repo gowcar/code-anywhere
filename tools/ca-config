@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""ca-config —— 管理 code-anywhere 的配置文件 ~/.config/code-anywhere/config.env
+
+  ca-config          看各项填了没有 → 用编辑器打开 → 保存后检查格式，有改动就重启服务生效
+  ca-config show     只看各项状态（密钥只显示前几位）
+  ca-config path     打印配置文件位置
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path(os.getenv("CODE_ANYWHERE_CONFIG", str(Path.home() / ".config/code-anywhere/config.env")))
+SECRET = re.compile(r"TOKEN|KEY|SECRET|PASSWORD", re.I)
+LINE = re.compile(r"^\s*(#\s*)?([A-Z][A-Z0-9_]*)=(.*)$")
+
+
+def entries() -> list[tuple[str, str, bool]]:
+    """(KEY, 值, 是否启用)，按文件顺序；同名以启用的为准。"""
+    seen: dict[str, tuple[str, str, bool]] = {}
+    for line in CONFIG.read_text().splitlines():
+        match = LINE.match(line)
+        if not match:
+            continue
+        key, value, enabled = match.group(2), match.group(3).strip().strip('"'), not match.group(1)
+        if key not in seen or (enabled and not seen[key][2]):
+            seen[key] = (key, value, enabled)
+    return list(seen.values())
+
+
+def show() -> None:
+    print(f"配置文件：{CONFIG}\n")
+    for key, value, enabled in entries():
+        if enabled and value:
+            shown = value[:4] + "…" if SECRET.search(key) and len(value) > 6 else value
+            print(f"  ✓ {key} = {shown}")
+        else:
+            print(f"  · {key}（未填）")
+
+
+def check() -> list[str]:
+    problems = []
+    for n, line in enumerate(CONFIG.read_text().splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not LINE.match(line):
+            problems.append(f"第 {n} 行不是 KEY=值 的格式：{stripped[:60]}")
+        elif line.split("=", 1)[1].strip().count('"') % 2:
+            problems.append(f"第 {n} 行引号没配对：{stripped[:60]}")
+    return problems
+
+
+def restart() -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.code-anywhere"])
+    else:
+        subprocess.run(["systemctl", "--user", "restart", "code-anywhere"])
+    port = dict((k, v) for k, v, on in entries() if on).get("BOT_PORT") or "5000"
+    for _ in range(20):
+        time.sleep(1)
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                    f"http://127.0.0.1:{port}/health", timeout=3):
+                print("✓ 已重启服务，改动生效")
+                return
+        except OSError:
+            continue
+    print("⚠️ 服务重启后健康检查没通过，看 ~/workspace/code-anywhere/logs/code-anywhere.log")
+
+
+def main() -> None:
+    action = sys.argv[1] if len(sys.argv) > 1 else "edit"
+    if action in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    if action == "path":
+        print(CONFIG)
+        return
+    if not CONFIG.exists():
+        sys.exit(f"还没有配置文件 {CONFIG}：先运行安装（README 里那一行 curl 命令）")
+    if action == "show":
+        show()
+        return
+    show()
+    before = CONFIG.read_text()
+    editor = os.getenv("VISUAL") or os.getenv("EDITOR") or next(
+        (e for e in ("nano", "vim", "vi") if shutil.which(e)), "vi")
+    input(f"\n按回车用 {editor} 打开（改完保存退出即可）…")
+    while True:
+        subprocess.run([*editor.split(), str(CONFIG)])
+        problems = check()
+        if not problems:
+            break
+        print("\n配置文件有格式问题：\n  " + "\n  ".join(problems))
+        input("按回车重新打开修改…")
+    CONFIG.chmod(0o600)
+    if CONFIG.read_text() == before:
+        print("没有改动。")
+        return
+    restart()
+
+
+if __name__ == "__main__":
+    main()

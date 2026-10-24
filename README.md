@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.s
 ```
 全程只在两处需要你：粘贴 bot token，在和 bot 的私聊里随便发一句话（自动识别你的账号，只允许你本人用）；Claude / Codex 没登录时会提示你登录。其余（依赖、服务、MCP、技能、规则）全自动，不会问你“要不要装”，也不会覆盖你已有的配置。可以反复执行，`./setup --check` 只检查不改动。
 
+所有密钥和设置（bot token、Claude / Codex 的 key 或自建网关地址、端口……）都在一个文件里：`~/.config/code-anywhere/config.env`。安装时没填的，之后运行 `ca-config` 打开修改，保存后自动检查并重启服务生效；`ca-config show` 只看各项填了没有。
+
 卸载（装了一半也能清理干净；只删 code-anywhere 自己装的东西，你的其他配置不动）：
 ```sh
 curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.sh | bash -s -- --uninstall

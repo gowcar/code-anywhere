@@ -376,7 +376,7 @@ def step_python():
             capture=False)
 
 
-OWN_TOOLS = ("issue-platform", "issue-upload", "issue-images", "local-issue", "gitlab-upload", "gitlab-issue-images")
+OWN_TOOLS = ("ca-config", "issue-platform", "issue-upload", "issue-images", "local-issue", "gitlab-upload", "gitlab-issue-images")
 CONVENIENCE_TOOLS = ("t", "tmux-tui")   # 电脑上挑选 tmux 会话的小工具；对方已有同名命令就保留对方的
 
 
