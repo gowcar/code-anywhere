@@ -5,8 +5,7 @@
 ```sh
 git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
 cd ~/workspace/code-anywhere
-./setup            # 交互式安装 / 修复
-./setup --yes      # 所有安装与写入都默认同意，一路装到底（bot token 等仍需你填）
+./setup            # 安装 / 修复：不问“要不要装”，安全的直接做，会改动你已有文件的跳过；只在要 bot token、登录时停下
 ./setup --check    # 只检查，不改任何东西
 ./setup --only telegram,service   # 只跑部分步骤
 ```
@@ -17,7 +16,7 @@ cd ~/workspace/code-anywhere
 |---|---|
 | deps | 全部自动装：git / curl / tmux（自动识别 apt、dnf、yum、pacman、zypper、apk、brew；Mac 无 Homebrew 时先装它）、uv、claude、Node 22（从 nodejs.org 下载到 `~/.local/share/node`，免 sudo）、codex（npm 装到 `~/.local`）、glab。Python 3.10+ 由入口脚本 `./setup` 先行安装 |
 | python | 用 uv 建 `.venv`，装 `requirements-mcp.txt`（含 `requirements.txt`） |
-| tools | `tools/` 下的 `t`、`tmux-tui`、`cc`、`gitlab-upload` → `~/.local/bin`，`tmux.conf` → `~/.tmux.conf`；已有且不同的先备份 |
+| tools | issue 相关工具（`issue-platform`、`issue-upload`、`issue-images`、`local-issue` 等）→ `~/.local/bin`；会话选择器 `t` / `tmux-tui` 只在没有同名命令时安装。不改你的 tmux 配置 |
 | auth | Claude（`claude auth status` 或 `.env` 的 `ANTHROPIC_API_KEY`）、Codex（登录或 config.toml 网关） |
 | telegram | 验证 BOT_TOKEN（getMe）；默认私聊 Thread 模式：你在 BotFather 打开 Threaded Mode，再在和 bot 的私聊里发一句话，自动识别你的 TG 用户 ID 写入 `.env`（ALLOWED_USERS 只放你自己）。也兼容话题群组 |
 | hooks | Claude hooks 写入 `~/.claude/settings.json` |

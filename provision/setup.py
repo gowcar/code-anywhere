@@ -36,7 +36,7 @@ PLAYWRIGHT_MCP_VERSION = "0.0.83"
 BEGIN, END = "<!-- code-anywhere:begin -->", "<!-- code-anywhere:end -->"
 IS_MAC = sys.platform == "darwin"
 CHECK_ONLY = False
-ASSUME_YES = False
+INTERACTIVE = False   # ./setup --ask 才逐项询问
 PROBLEMS: list[str] = []
 
 
@@ -52,10 +52,13 @@ def warn(msg):
 
 
 def ask(question: str, default: bool = True) -> bool:
+    """默认不提问（用户没法判断要不要装某个依赖）：安全的直接做，会改动用户已有文件的直接跳过。
+    只有 ./setup --ask 时才逐项询问。必须由用户提供的东西（bot token、登录）用 prompt，不走这里。"""
     if CHECK_ONLY:
         return False
-    if ASSUME_YES:  # 只自动同意默认为“是”的项；覆盖用户已有文件这类默认“否”的照样跳过
-        print(f"  ? {question} → {'是' if default else '否'}（--yes）")
+    if not INTERACTIVE:
+        label = question.rstrip("？?")
+        print(f"  → {label}" if default else f"  → 跳过（不改动你已有的东西）：{label}")
         return default
     hint = "[Y/n]" if default else "[y/N]"
     answer = input(f"  ? {question} {hint} ").strip().lower()
@@ -365,23 +368,25 @@ def step_python():
             capture=False)
 
 
+OWN_TOOLS = ("issue-platform", "issue-upload", "issue-images", "local-issue", "gitlab-upload", "gitlab-issue-images")
+CONVENIENCE_TOOLS = ("t", "tmux-tui")   # 电脑上挑选 tmux 会话的小工具；对方已有同名命令就保留对方的
+
+
 def step_tools():
-    """个人工具：t / tmux-tui / cc / issue-upload / issue-images（GitHub 与 GitLab）→ ~/.local/bin，tmux.conf → ~/.tmux.conf"""
-    targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "issue-platform", "issue-upload", "issue-images",
-                                             "local-issue", "gitlab-upload", "gitlab-issue-images")}
-    pointer = HOME / ".config" / "code-anywhere" / "repo"   # local-issue 等工具靠它找到仓库
-    if not CHECK_ONLY and (not pointer.exists() or pointer.read_text().strip() != str(REPO)):
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(str(REPO) + "\n")
-    targets["tmux.conf"] = HOME / ".tmux.conf"
-    for name, target in targets.items():
-        source = REPO / "tools" / name
+    """命令行工具：issue 相关工具 → ~/.local/bin；会话选择器 t（对方没有同名命令时才装）"""
+    # t 会调用 tmux-tui，两个配套：只要有一个是对方自己的同名命令，两个都不装
+    theirs = [n for n in CONVENIENCE_TOOLS
+              if (BIN / n).exists() and (BIN / n).read_bytes() != (REPO / "tools" / n).read_bytes()]
+    if theirs:
+        ok(f"已有你自己的 {'、'.join(theirs)}，会话选择器 t 不安装，保留你的版本")
+    for name in OWN_TOOLS + (() if theirs else CONVENIENCE_TOOLS):
+        source, target = REPO / "tools" / name, BIN / name
         if target.exists() and target.read_bytes() == source.read_bytes():
             ok(f"{name} 已是最新")
             continue
         if target.exists():
-            warn(f"{target} 与仓库版本不同")
-            if not ask(f"用仓库版本覆盖 {target}（旧文件备份为 .bak-时间戳）？", default=False):
+            warn(f"{name} 不是最新")
+            if not ask(f"更新 {name}（旧文件备份为 .bak-时间戳）？"):
                 continue
             target.rename(target.with_name(f"{target.name}.bak-{int(time.time())}"))
         else:
@@ -391,6 +396,10 @@ def step_tools():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         ok(f"{name} → {target}")
+    pointer = HOME / ".config" / "code-anywhere" / "repo"   # local-issue 等工具靠它找到仓库
+    if not CHECK_ONLY and (not pointer.exists() or pointer.read_text().strip() != str(REPO)):
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(REPO) + "\n")
     if str(BIN) not in os.environ.get("PATH", "").split(":"):
         warn(f"{BIN} 不在 PATH 里，请在 shell 配置中加入它（fish: fish_add_path {BIN}）")
 
@@ -778,12 +787,13 @@ def main():
     ensure_common_paths()
     parser = argparse.ArgumentParser(description="code-anywhere 安装 / 自检")
     parser.add_argument("--check", action="store_true", help="只检查，不做任何修改")
-    parser.add_argument("--yes", "-y", action="store_true", help="所有安装与写入都默认同意")
+    parser.add_argument("--ask", action="store_true", help="逐项询问（默认不问：安全的直接做，会改动你已有文件的跳过）")
+    parser.add_argument("--yes", "-y", action="store_true", help=argparse.SUPPRESS)   # 兼容旧用法，现在本来就不问
     parser.add_argument("--only", help="只跑这些步骤（逗号分隔）：" + ",".join(STEPS))
     args = parser.parse_args()
     CHECK_ONLY = args.check
-    global ASSUME_YES
-    ASSUME_YES = args.yes
+    global INTERACTIVE
+    INTERACTIVE = args.ask
     os.environ["PATH"] = f"{BIN}:{os.environ.get('PATH', '')}"  # 刚装的命令后续步骤立刻可用
     names = args.only.split(",") if args.only else list(STEPS)
     print(f"code-anywhere {'自检' if CHECK_ONLY else '安装'}：{REPO}\n")

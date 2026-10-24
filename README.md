@@ -28,7 +28,7 @@ flowchart LR
 git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
 cd ~/workspace/code-anywhere && ./setup
 ```
-按提示走：粘贴 token → 打开和 bot 的私聊随便发一句话（自动识别你的账号，只允许你本人用）→ 按提示登录 Claude / Codex。其余（依赖、服务、MCP、技能、规则）全自动。可以反复执行，`./setup --check` 只检查不改动。
+全程只在两处需要你：粘贴 bot token，在和 bot 的私聊里随便发一句话（自动识别你的账号，只允许你本人用）；Claude / Codex 没登录时会提示你登录。其余（依赖、服务、MCP、技能、规则）全自动，不会问你“要不要装”，也不会覆盖你已有的配置。可以反复执行，`./setup --check` 只检查不改动。
 
 **4. 开始用**：私聊里会自动出现两个内置 Thread：**code-anywhere**（总体协调）和 **issue-desk**（反馈问题）。新项目发 `/new 项目名`（加 `codex` 用 Codex）。
 
