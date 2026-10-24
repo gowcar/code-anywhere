@@ -71,3 +71,43 @@ class RepoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitHubBackendTests(unittest.TestCase):
+    def setUp(self):
+        from src import issues
+        self.issues = issues
+        issues._repo_names.clear()
+
+    def test_github_issues_normalized_like_gitlab(self):
+        from unittest.mock import patch
+        calls = []
+        def fake_gh(method, path, body=None):
+            calls.append((method, path, body))
+            if path.startswith("issues?"):
+                return [{"number": 3, "title": "登录失败", "labels": [{"name": "agent:to-verify"}],
+                         "html_url": "https://github.com/alan/app/issues/3", "created_at": "2026-10-24T00:00:00Z",
+                         "repository": {"id": 77, "full_name": "alan/app"}},
+                        {"number": 4, "pull_request": {}, "repository": {"id": 77, "full_name": "alan/app"}}]
+            if path.endswith("/comments?per_page=100"):
+                return [{"body": "验证方法：打开首页登录", "created_at": "2026-10-24T01:00:00Z"}]
+            return {}
+        with patch.dict("os.environ", {"ISSUE_PLATFORM": "github"}), patch.object(self.issues, "_gh", fake_gh):
+            found = self.issues.fetch_open_issues()
+            self.assertEqual(len(found), 1)                          # PR 不算 issue
+            issue = found[0]
+            self.assertEqual((issue["project_id"], issue["iid"], issue["references"]["full"]), (77, 3, "alan/app#3"))
+            self.assertEqual(issue["verify_hint"], "打开首页登录")
+            self.issues.verify_pass(77, 3)
+        self.assertIn(("DELETE", "repos/alan/app/issues/3/labels/agent%3Ato-verify", None), calls)
+        self.assertIn(("PATCH", "repos/alan/app/issues/3", {"state": "closed", "state_reason": "completed"}), calls)
+
+    def test_abandon_removes_state_labels(self):
+        from unittest.mock import patch
+        calls = []
+        with patch.dict("os.environ", {"ISSUE_PLATFORM": "github"}), \
+             patch.object(self.issues, "_gh", lambda m, p, b=None: calls.append((m, p, b)) or {}):
+            self.issues._repo_names[77] = "alan/app"
+            self.issues.abandon(77, 3)
+        self.assertIn(("POST", "repos/alan/app/issues/3/labels", {"labels": ["agent:wontfix"]}), calls)
+        self.assertTrue(any(c[1].endswith("labels/agent%3Adoing") for c in calls))

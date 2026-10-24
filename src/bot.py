@@ -544,7 +544,7 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ /status ============
 
 async def cmd_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """按 agent:* 状态汇总 GitLab issue（直接调 API，不经过模型），每条带操作按钮。"""
+    """按 agent:* 状态汇总 issue（GitLab / GitHub，直接调 API，不经过模型），每条带操作按钮。"""
     if not auth_check(update.effective_user.id):
         return
     text, markup = await _issues_summary()
@@ -554,14 +554,16 @@ async def cmd_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _issues_summary():
     """第一层：精简列表（每个 issue 一个按钮）。"""
     from src import issues
+    if not await asyncio.to_thread(issues.configured):
+        return "还没有配置 issue 流程：在 code-anywhere 的 Thread 里说“配置 issue 流程”", None
     try:
         found = await asyncio.to_thread(issues.fetch_open_issues)
         return issues.overview(found)
     except FileNotFoundError:
-        return "还没有配置 GitLab 令牌（~/.config/gitlab-token），运行 ./setup --only gitlab", None
+        return "还没有配置 issue 流程：在 code-anywhere 的 Thread 里说“配置 issue 流程”", None
     except Exception as exc:
         log.warning("[issues] 查询失败: %s", exc)
-        return f"⚠️ 查询 GitLab 失败：{html_lib.escape(str(exc))}", None
+        return f"⚠️ 查询 {issues.platform_name()} 失败：{html_lib.escape(str(exc))}", None
 
 
 # “不通过”时请用户回复原因：提示消息 id → (project_id, iid)
@@ -606,7 +608,7 @@ async def _issues_callback(query, context, data: str):
                 await query.answer(f"{ref} 已放弃并关闭")
                 if was_doing:
                     result = await issues.notify_owner(
-                        issue, f"GitLab issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
+                        issue, f"issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
                     await query.message.reply_text(f"🗑 {ref} 已放弃并关闭；{result}")
         except Exception as exc:
             log.warning("[issues] 操作失败 %s %s: %s", action, ref, exc)
@@ -638,7 +640,7 @@ async def _handle_issue_reason(message) -> bool:
         issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
         await asyncio.to_thread(issues.note, project_id, iid, f"↩️ 验证未通过的原因（用户在 TG 补充）：\n\n{reason}")
         result = await issues.notify_owner(
-            issue, f"GitLab issue 验证未通过：{issue['web_url']}，{reason[:120]}；请按全局规则「GitLab issue 处理」重新接手。")
+            issue, f"issue 验证未通过：{issue['web_url']}，{reason[:120]}；请按全局规则「issue 处理」重新接手。")
         await message.reply_text(f"已写进 {issues.short_ref(issue)}；{result}")
     except Exception as exc:
         log.warning("[issues] 记录原因失败: %s", exc)
@@ -1923,7 +1925,7 @@ def create_app() -> Application:
             BotCommand("projects", "项目列表"),
             BotCommand("sessions", "历史会话"),
             BotCommand("status", "活跃会话"),
-            BotCommand("issues", "GitLab issue 状态汇总（待验证/处理中/待处理）"),
+            BotCommand("issues", "issue 状态汇总（待验证/处理中/待处理）"),
             BotCommand("trust", "项目信任开关"),
             BotCommand("whoami", "你的 ID"),
         ])

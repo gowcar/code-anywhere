@@ -1,23 +1,125 @@
-"""/issues：按 agent:* 状态汇总 GitLab issue，直接调 API，不经过模型。
+"""/issues：按 agent:* 状态汇总 issue，直接调 API，不经过模型。支持 GitLab 和 GitHub。
 
 数据源是“我创建的、未关闭的 issue”（issue-desk 用的就是这个账号的令牌），
 所以新仓库无需配置；按 agent:* 标签分组展示。
+
+平台：.env 的 ISSUE_PLATFORM=github|gitlab；不写时有 GitLab 令牌文件就是 gitlab，否则 github。
+GitHub 的 issue 也整理成和 GitLab 一样的字段（project_id=仓库数字 ID、iid=编号、references.full、web_url），
+界面和按钮两边通用。
 """
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from html import escape
 from pathlib import Path
 
 TOKEN_FILE = Path.home() / ".config" / "gitlab-token"
+GITHUB_TOKEN_FILE = Path.home() / ".config" / "github-token"
+
+
+def platform() -> str:
+    explicit = os.getenv("ISSUE_PLATFORM", "").lower()
+    if explicit in ("github", "gitlab"):
+        return explicit
+    return "gitlab" if TOKEN_FILE.exists() else "github"
+
+
+def platform_name() -> str:
+    return "GitHub" if platform() == "github" else "GitLab"
+
+
+def configured() -> bool:
+    return bool(_github_token()) if platform() == "github" else TOKEN_FILE.exists()
+
+
+def _github_token() -> str:
+    if GITHUB_TOKEN_FILE.exists():
+        return GITHUB_TOKEN_FILE.read_text().strip()
+    import shutil
+    import subprocess
+    gh = shutil.which("gh") or str(Path.home() / ".local/bin/gh")
+    try:
+        return subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _gh(method: str, path: str, body: dict | None = None):
+    req = urllib.request.Request(f"https://api.github.com/{path.lstrip('/')}", method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {_github_token()}",
+                                          "Accept": "application/vnd.github+json",
+                                          "X-GitHub-Api-Version": "2022-11-28"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else {}
+
+
+def _gh_normalize(issue: dict, full: str) -> dict:
+    return {"project_id": issue.get("repository", {}).get("id") or _gh_repo_id(full), "iid": issue["number"],
+            "title": issue.get("title", ""), "labels": [l["name"] for l in issue.get("labels", [])],
+            "references": {"full": f"{full}#{issue['number']}"}, "web_url": issue.get("html_url", ""),
+            "created_at": issue.get("created_at", ""), "state": issue.get("state")}
+
+
+_repo_names: dict[int, str] = {}
+
+
+def _gh_repo_id(full: str) -> int:
+    repo_id = _gh("GET", f"repos/{full}")["id"]
+    _repo_names[repo_id] = full
+    return repo_id
+
+
+def _gh_full(project_id: int) -> str:
+    if project_id not in _repo_names:
+        _repo_names[project_id] = _gh("GET", f"repositories/{project_id}")["full_name"]
+    return _repo_names[project_id]
+
+
+def _gh_fetch_open() -> list[dict]:
+    issues, page = [], 1
+    while True:
+        batch = _gh("GET", f"issues?filter=created&state=open&per_page=100&page={page}")
+        for item in batch:
+            if "pull_request" in item:
+                continue
+            full = item["repository"]["full_name"]
+            _repo_names[item["repository"]["id"]] = full
+            issue = _gh_normalize(item, full)
+            if "agent:to-verify" in issue["labels"]:
+                comments = _gh("GET", f"repos/{full}/issues/{item['number']}/comments?per_page=100")
+                issue["verify_hint"] = verify_hint([{"body": c.get("body", ""), "created_at": c.get("created_at", "")}
+                                                    for c in comments])
+            issues.append(issue)
+        if len(batch) < 100:
+            return issues
+        page += 1
+
+
+def _gh_relabel(project_id: int, iid: int, remove: list[str], add: list[str], close: str | None = None) -> dict:
+    full = _gh_full(project_id)
+    for label in remove:
+        try:
+            _gh("DELETE", f"repos/{full}/issues/{iid}/labels/{urllib.parse.quote(label, safe='')}")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+    if add:
+        _gh("POST", f"repos/{full}/issues/{iid}/labels", {"labels": add})
+    if close:
+        return _gh("PATCH", f"repos/{full}/issues/{iid}", {"state": "closed", "state_reason": close})
+    return {}
 STATES = [  # (标签, 标题)，按展示顺序
     ("agent:to-verify", "🧪 待验证"),
     ("agent:blocked", "⛔ 阻塞，需要你决定"),
     ("agent:doing", "🔧 处理中"),
     ("agent:todo", "📥 待处理"),
 ]
+ACTION_LABELS = [label for label, _ in STATES]   # 放弃时一并摘掉的状态标签
 
 
 # 待验证 issue 的评论里约定有一行「验证方法：…」（兼容早期的“如何验证/验证方式”）
@@ -42,6 +144,8 @@ def verify_hint(notes: list[dict]) -> str | None:
 
 
 def fetch_open_issues(host: str | None = None) -> list[dict]:
+    if platform() == "github":
+        return _gh_fetch_open()
     host = host or os.getenv("GITLAB_HOST", "git.garena.com")
     token = TOKEN_FILE.read_text().strip()
     issues, page = [], 1
@@ -69,28 +173,40 @@ def _write(method: str, path: str, host: str | None = None, **params) -> dict:
 
 
 def get_issue(project_id: int, iid: int) -> dict:
+    if platform() == "github":
+        full = _gh_full(project_id)
+        return _gh_normalize(_gh("GET", f"repos/{full}/issues/{iid}"), full)
     host = os.getenv("GITLAB_HOST", "git.garena.com")
     return _get(host, TOKEN_FILE.read_text().strip(), f"projects/{project_id}/issues/{iid}")
 
 
 def note(project_id: int, iid: int, body: str) -> None:
+    if platform() == "github":
+        _gh("POST", f"repos/{_gh_full(project_id)}/issues/{iid}/comments", {"body": body})
+        return
     _write("POST", f"projects/{project_id}/issues/{iid}/notes", body=body)
 
 
 def verify_pass(project_id: int, iid: int) -> dict:
     note(project_id, iid, "✅ 用户在 TG 验证通过，关闭。")
+    if platform() == "github":
+        return _gh_relabel(project_id, iid, ["agent:to-verify"], [], close="completed")
     return _write("PUT", f"projects/{project_id}/issues/{iid}", state_event="close",
                   remove_labels="agent:to-verify")
 
 
 def verify_fail(project_id: int, iid: int) -> dict:
     note(project_id, iid, "↩️ 用户在 TG 验证未通过，退回待处理（原因见后续评论）。")
+    if platform() == "github":
+        return _gh_relabel(project_id, iid, ["agent:to-verify"], ["agent:todo"])
     return _write("PUT", f"projects/{project_id}/issues/{iid}",
                   remove_labels="agent:to-verify", add_labels="agent:todo")
 
 
 def abandon(project_id: int, iid: int) -> dict:
     note(project_id, iid, "🗑 用户在 TG 决定放弃处理，关闭。")
+    if platform() == "github":
+        return _gh_relabel(project_id, iid, list(ACTION_LABELS), ["agent:wontfix"], close="not_planned")
     return _write("PUT", f"projects/{project_id}/issues/{iid}", state_event="close",
                   remove_labels=",".join(ACTION_LABELS), add_labels="agent:wontfix")
 
@@ -226,7 +342,7 @@ def detail(issues: list[dict], project_id: int, iid: int):
     if state == "agent:to-verify":
         hint = issue.get("verify_hint")
         lines += ["", f"验证：{escape(hint)}" if hint else "⚠️ 负责会话还没写验证方法，可在 issue-desk 追问"]
-    lines += ["", f'<a href="{escape(issue["web_url"], quote=True)}">在 GitLab 打开</a> · 第 {index + 1}/{len(items)} 个']
+    lines += ["", f'<a href="{escape(issue["web_url"], quote=True)}">在 {platform_name()} 打开</a> · 第 {index + 1}/{len(items)} 个']
     if state == "agent:to-verify":
         actions = [InlineKeyboardButton("✅ 通过", callback_data=f"is:pass:{key}", style="success"),
                    InlineKeyboardButton("↩️ 不通过", callback_data=f"is:fail:{key}", style="primary")]
