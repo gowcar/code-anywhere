@@ -353,7 +353,7 @@ def install_glab():
 def step_python():
     """Python 虚拟环境与依赖"""
     probe = REPO / ".venv" / "bin" / "python"
-    if probe.exists() and run([str(probe), "-c", "import telegram, mcp, aiohttp, mistune, dotenv"]).returncode == 0:
+    if probe.exists() and run([str(probe), "-c", "import telegram, aiohttp, mistune, dotenv, PIL"]).returncode == 0:
         ok(".venv 依赖齐全")
         return
     warn(".venv 不存在或依赖不全")
