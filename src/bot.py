@@ -190,6 +190,66 @@ def _model_status(cwd: str) -> str:
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "workspace")))
 
 
+async def create_project(bot, chat_id: int, name: str, path: Path, engine: str, intro: str = "") -> int:
+    """建目录 + 建 Thread + 绑定 + 启动 CLI；/new 和内置 Thread 共用。"""
+    created = not path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    topic = await bot.create_forum_topic(chat_id=chat_id, name=name)
+    tid = topic.message_thread_id
+    projects.bind(tid, str(path))
+    from src import liveness
+    liveness.remember_topic_name(tid, name)
+    state.set_cwd(tid, str(path))
+    backends.set_backend(str(path), engine)
+    log.info(f"[new] {path} → topic {tid} engine={engine} created={created}")
+    await bot.send_message(
+        chat_id=chat_id, message_thread_id=tid,
+        text=(intro or f"✅ 新项目 {name}") + f"\n目录：{path}{'（新建）' if created else '（已有目录）'}\n"
+             f"引擎：{'Codex' if engine == 'codex' else 'Claude'}，正在启动…\n\n"
+             "直接在这里说话开始。/model 切换模型、effort 和权限。")
+    if chat_id > 0:  # 私聊 Thread：输入框下方的快捷键盘
+        try:
+            await ensure_quick_keyboard(bot, chat_id, tid)
+        except Exception as exc:
+            log.warning("[keyboard] 发送快捷键盘失败 thread=%s: %s", tid, exc)
+    async with _project_locks.setdefault(str(path), asyncio.Lock()):
+        pane = await _ensure_pane_for_project(str(path), chat_id, tid)
+    await bot.send_message(chat_id=chat_id, message_thread_id=tid,
+                           text="🟢 终端已就绪" if pane else "⚠️ 终端启动失败，发第一条消息时会再试一次")
+    return tid
+
+
+ISSUE_DESK_PLACEHOLDER = """# issue-desk — 问题反馈台
+
+本会话专门接收用户在 TG 里口头反馈的问题，整理成 issue 提交到正确的仓库，并通知负责的项目会话。**不改任何仓库代码。**
+
+issue 流程还没有配置。用户第一次来反馈时，先告诉用户：需要先在 code-anywhere 的 Thread 里说“配置 issue 流程”，配好后这份说明会被替换。
+"""
+
+
+async def ensure_builtin_projects(bot, chat_id: int) -> None:
+    """内置 Thread 一定存在（用户要求，2026-10-24）：code-anywhere 总体协调，issue-desk 反馈问题。"""
+    import shutil
+    engine = "claude" if shutil.which("claude") or (Path.home() / ".local/bin/claude").exists() else "codex"
+    builtins = [
+        ("code-anywhere", config.PROJECT_ROOT, "✅ code-anywhere：总体协调。想加能力、改配置、问整体状况，都在这里说。"),
+        ("issue-desk", WORKSPACE_ROOT / "issue-desk", "✅ issue-desk：反馈问题。在这里说遇到的问题，它会整理成 issue 并通知负责的项目会话。"),
+    ]
+    for name, path, intro in builtins:
+        path = Path(path).resolve()
+        if projects.get_topic(str(path)):
+            continue
+        if name == "issue-desk":
+            path.mkdir(parents=True, exist_ok=True)
+            if not (path / "CLAUDE.md").exists():
+                (path / "CLAUDE.md").write_text(ISSUE_DESK_PLACEHOLDER)
+                (path / "AGENTS.md").write_text(ISSUE_DESK_PLACEHOLDER)
+        try:
+            await create_project(bot, chat_id, name, path, engine, intro)
+        except Exception:
+            log.warning("[builtin] 创建内置 Thread %s 失败", name, exc_info=True)
+
+
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/new <名字> [claude|codex]：建目录 + 建话题 + 启动 CLI，全程不用登录服务器。"""
     if not auth_check(update.effective_user.id):
@@ -209,30 +269,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if existing := projects.get_topic(str(path)):
         await update.message.reply_text(f"项目已存在：{link(existing)}")
         return
-    created = not path.exists()
-    path.mkdir(parents=True, exist_ok=True)
-    topic = await context.bot.create_forum_topic(chat_id=chat_id, name=args[0])
-    tid = topic.message_thread_id
-    projects.bind(tid, str(path))
-    from src import liveness
-    liveness.remember_topic_name(tid, args[0])
-    state.set_cwd(tid, str(path))
-    backends.set_backend(str(path), engine)
-    log.info(f"[new] {path} → topic {tid} engine={engine} created={created}")
-    await context.bot.send_message(
-        chat_id=chat_id, message_thread_id=tid,
-        text=f"✅ 新项目 {args[0]}\n目录：{path}{'（新建）' if created else '（已有目录）'}\n"
-             f"引擎：{'Codex' if engine == 'codex' else 'Claude'}，正在启动…\n\n"
-             "直接在这里说话开始。/model 切换模型、effort 和权限。")
-    if chat_id > 0:  # 私聊 Thread：输入框下方的快捷键盘
-        try:
-            await ensure_quick_keyboard(context.bot, chat_id, tid)
-        except Exception as exc:
-            log.warning("[keyboard] 发送快捷键盘失败 thread=%s: %s", tid, exc)
-    async with _project_locks.setdefault(str(path), asyncio.Lock()):
-        pane = await _ensure_pane_for_project(str(path), chat_id, tid)
-    await context.bot.send_message(chat_id=chat_id, message_thread_id=tid,
-                                   text="🟢 终端已就绪" if pane else "⚠️ 终端启动失败，发第一条消息时会再试一次")
+    tid = await create_project(context.bot, chat_id, args[0], path, engine)
     if update.message.message_thread_id != tid:
         await update.message.reply_text(f"已创建：{link(tid)}")
 
@@ -1892,6 +1929,7 @@ def create_app() -> Application:
         ])
         # 如果已有 CHAT_ID，启动时同步 + 定时同步
         if config.CHAT_ID:
+            await ensure_builtin_projects(application.bot, config.CHAT_ID)
             await sync_all_projects(application.bot, config.CHAT_ID)
             # sync 完成后再 recover，确保新绑定的项目也能恢复终端会话
             from src.api_server import _recover_active_sessions
