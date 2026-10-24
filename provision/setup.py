@@ -787,6 +787,49 @@ def step_service():
             warn("服务没有在运行：systemctl --user status code-anywhere 查看原因")
 
 
+PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                 "OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME")
+
+
+def cli_env() -> dict[str, str]:
+    """和桥接拉起 CLI 时一样的环境：当前环境 + 配置文件里的密钥与网关。"""
+    env = dict(os.environ)
+    env.update({k: v for k, v in read_config().items() if k in PROVIDER_KEYS and v})
+    return env
+
+
+def smoke(cmd: list[str], timeout: int) -> tuple[bool, str]:
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=cli_env(),
+                             cwd=str(HOME), stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, f"{timeout} 秒没有回应"
+    text = (out.stdout or "") + (out.stderr or "")
+    return ("OK" in (out.stdout or "").upper(), " ".join(text.split())[-200:])
+
+
+def step_models():
+    """模型连通检测：用和桥接相同的配置，让 Claude / Codex 各真的回答一句"""
+    if CHECK_ONLY:
+        info("只检查模式不调用模型（会产生少量费用）；安装时会实际测一次")
+        return
+    prompt_text = "只回复两个大写字母 OK，不要别的内容"
+    if which("claude"):
+        good, detail = smoke([which("claude"), "-p", prompt_text], 180)
+        if good:
+            ok("Claude 能正常调用模型")
+        else:
+            warn(f"Claude 调用模型失败：{detail}")
+            info(f"检查登录（claude auth login）或配置文件里的 ANTHROPIC_* 项：ca-config")
+    if which("codex"):
+        good, detail = smoke([which("codex"), "exec", "--skip-git-repo-check", "-s", "read-only", prompt_text], 240)
+        if good:
+            ok("Codex 能正常调用模型")
+        else:
+            warn(f"Codex 调用模型失败：{detail}")
+            info("检查 codex login，或配置文件里的 OPENAI_* 项、~/.codex/config.toml 的模型提供商：ca-config")
+
+
 def step_verify():
     """最终自检：服务健康 + 往 Telegram 发一条上线消息"""
     env = read_config()
@@ -813,7 +856,7 @@ def step_verify():
 
 STEPS = {"deps": step_deps, "python": step_python, "config": step_config, "tools": step_tools, "auth": step_cli_auth,
          "telegram": step_telegram, "hooks": step_hooks, "mcp": step_mcp, "browser": step_browser, "rules": step_rules,
-         "issues": step_issues, "service": step_service, "verify": step_verify}
+         "issues": step_issues, "service": step_service, "models": step_models, "verify": step_verify}
 
 
 def uninstall() -> None:
