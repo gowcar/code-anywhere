@@ -802,8 +802,9 @@ def main():
         print(f"[{i}/{len(names)}] {step.__doc__.splitlines()[0]}")
         try:
             step()
-        except KeyboardInterrupt:
-            print("\n  已中止本步骤")
+        except KeyboardInterrupt:   # Ctrl+C 就是要停下：整体退出，不再继续后面的步骤
+            print("\n\n已中止。重新运行会从头检查，已经装好的会直接跳过。")
+            sys.exit(130)
         except Exception as exc:  # 单步失败不影响后续步骤
             warn(f"{name} 出错：{exc}")
         print()
