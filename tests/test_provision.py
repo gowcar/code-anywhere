@@ -47,7 +47,7 @@ class GroupMessageTests(unittest.TestCase):
             {"update_id": 3, "message": {"chat": {"id": -100, "type": "supergroup"}, "from": {"id": 7, "is_bot": True}}},
         ]
         self.assertEqual(setup.find_group_message(updates),
-                         {"chat_id": -100, "title": "G", "is_forum": True, "private": False, "user_id": 9, "user": "me"})
+                         {"chat_id": -100, "title": "G", "is_forum": True, "private": False, "user_id": 9, "user": "me", "thread_id": None})
 
     def test_private_message_selects_private_thread_mode(self):
         found = setup.find_group_message([{"update_id": 1, "message": {"chat": {"id": 9, "type": "private"},
