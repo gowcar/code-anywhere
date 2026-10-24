@@ -3,10 +3,11 @@ import os
 from pathlib import Path
 from urllib.parse import quote
 
-import httpx
-from mcp.server.fastmcp import FastMCP
+import aiohttp
 
-mcp = FastMCP('code-anywhere-sessions')
+from src.stdio_mcp import StdioMCP
+
+mcp = StdioMCP('code-anywhere-sessions')
 BASE = f"http://127.0.0.1:{int(os.getenv('BOT_PORT', '5000'))}/agent/sessions"
 
 
@@ -38,11 +39,16 @@ def source_session(sessions, ancestors):
     raise ValueError('Cannot identify the sending CLI session. Launch this MCP from the sending Codex/Claude client.')
 
 
+async def _http(method, url, body=None, timeout=60, check=True):
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), trust_env=False) as client:
+        async with client.request(method, url, json=body) as response:
+            if check:
+                response.raise_for_status()
+            return await response.json(content_type=None)
+
+
 async def call(method, suffix='', body=None):
-    async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
-        response = await client.request(method, BASE + suffix, json=body)
-        response.raise_for_status()
-        return response.json()
+    return await _http(method, BASE + suffix, body)
 
 
 @mcp.tool()
@@ -136,17 +142,14 @@ Login state is shared by all sessions, so other sessions benefit too.
 """
     sessions = (await call('GET'))['sessions']
     source = source_session(sessions, caller_processes())
-    async with httpx.AsyncClient(timeout=90, trust_env=False) as client:
-        response = await client.post(BROWSER + '/help', json={'source_session_id': source, 'reason': reason})
-        return response.json()
+    return await _http('POST', BROWSER + '/help', {'source_session_id': source, 'reason': reason}, timeout=90, check=False)
 
 
 @mcp.tool()
 async def browser_help_status(help_id: str) -> dict:
     """Check a request_browser_help: waiting / done / timeout / failed."""
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        return (await client.get(BROWSER + '/help/' + quote(help_id, safe=''))).json()
+    return await _http('GET', BROWSER + '/help/' + quote(help_id, safe=''), timeout=30, check=False)
 
 
 if __name__ == '__main__':
-    mcp.run(transport='stdio')
+    mcp.run()

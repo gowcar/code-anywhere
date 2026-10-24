@@ -582,11 +582,12 @@ def step_remote_view():
         ok("websockify")
     else:
         warn("缺少 websockify")
-        if ask("装到项目虚拟环境（pip install websockify）？"):
-            pip = REPO / ".venv" / "bin" / "pip"
-            run([str(pip) if pip.exists() else which("uv") or "pip", *([] if pip.exists() else ["pip"]),
-                 "install", *(["--python", str(REPO / ".venv" / "bin" / "python")] if not pip.exists() else []),
-                 "websockify"], capture=False)
+        # 只装 websockify 本身（加 numpy 提速）：它的 jwcrypto/redis/requests 只给令牌插件用，
+        # jwcrypto 会拖进要编译的 cryptography（Intel Mac 上没有现成安装包）
+        if ask("装到项目虚拟环境（websockify，不带用不到的插件依赖）？"):
+            py = str(REPO / ".venv" / "bin" / "python")
+            run([which("uv") or "uv", "pip", "install", "--python", py, "--no-deps", "websockify"], capture=False)
+            run([which("uv") or "uv", "pip", "install", "--python", py, "numpy"], capture=False)
     if IS_MAC:  # Retina 屏远程查看时临时降分辨率用
         if shutil.which("displayplacer") or (BIN / "displayplacer").exists():
             ok("displayplacer（远程查看时临时降分辨率）")
@@ -837,6 +838,21 @@ def uninstall() -> None:
     print("\n卸载完成 ✓")
 
 
+class _Tee(io.TextIOBase):
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+            stream.flush()
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
 def ensure_common_paths() -> None:
     """ssh 远程执行、launchd 等非登录环境的 PATH 里常常没有 Homebrew 和 ~/.local/bin，
     会把已经装好的 tmux、node 误判为缺失，生成的服务 PATH 也会缺目录（2026-10-24 Alan 的 Mac）。"""
@@ -865,6 +881,10 @@ def main():
     INTERACTIVE = args.ask
     os.environ["PATH"] = f"{BIN}:{os.environ.get('PATH', '')}"  # 刚装的命令后续步骤立刻可用
     names = args.only.split(",") if args.only else list(STEPS)
+    if not CHECK_ONLY:   # 完整输出另存一份，出问题时不用截图，直接看 logs/setup.log
+        (REPO / "logs").mkdir(exist_ok=True)
+        sys.stdout = _Tee(sys.stdout, open(REPO / "logs" / "setup.log", "a", encoding="utf-8"))
+        print(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} ./setup {' '.join(sys.argv[1:])}")
     print(f"code-anywhere {'自检' if CHECK_ONLY else '安装'}：{REPO}\n")
     for i, name in enumerate(names, 1):
         step = STEPS[name]
