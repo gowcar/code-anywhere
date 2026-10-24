@@ -34,6 +34,9 @@ async def restart(cwd: str, topic_id: int) -> str:
     log.info("[model] restarted %s pane=%s sid=%s argv=%s", backend, pane, sid, argv[1:])
     for _ in range(40):
         await asyncio.sleep(0.5)
+        # 第一次在这个目录跑这个 CLI 会弹“是否信任此文件夹”：默认选项是退出，不处理就会卡住，
+        # 用户紧接着发的消息还会被当成回车把 CLI 退掉（2026-10-24 digital-buddy 从 Codex 切 Claude）
+        await bot._accept_trust_prompt(pane, wait=0.5)
         if not await backends.pane_processes(pane, backend):
             continue
         if backend == "codex":

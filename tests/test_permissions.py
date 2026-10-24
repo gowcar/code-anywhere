@@ -102,6 +102,20 @@ class PermissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('danger-full-access', respawn)
         self.assertEqual(api_server.terminal_sessions['native-id']['permission_mode'], 'full')
 
+    async def test_switch_to_new_engine_accepts_folder_trust_prompt(self):
+        # 第一次在这个目录跑 Claude 会弹信任框；切换引擎时要自动接受，否则卡住、随后的消息还会把 CLI 退掉
+        from src import model_switch
+        backends.set_backend(self.cwd, 'claude')
+        accept = AsyncMock(return_value=True)
+        with patch.object(bot, '_find_pane_for_project', AsyncMock(return_value='%1')), \
+             patch.object(backends, 'pane_processes', AsyncMock(return_value=[123])), \
+             patch.object(backends, 'command', AsyncMock(return_value='')), \
+             patch.object(bot, '_accept_trust_prompt', accept), \
+             patch.object(bot, '_hook_session_for_pane', AsyncMock(return_value=True)), \
+             patch.object(model_switch.asyncio, 'sleep', AsyncMock()):
+            self.assertIn('新会话', await model_switch.restart(self.cwd, 12))
+        accept.assert_awaited_with('%1', wait=0.5)
+
     async def test_failed_restart_restores_saved_preference(self):
         backends.set_backend(self.cwd, 'codex')
         permissions.set_mode(self.cwd, 'workspace')
