@@ -88,16 +88,25 @@ class Request:
     permission: str | None = None
 
 
+def _norm(text: str) -> str:
+    """宽松比较：忽略大小写、空格、点、横线等（opus5.5 / Opus 5.5 / opus-5-5 都算同一个）。"""
+    import re
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", text.lower())
+
+
 def _claude_model(token: str) -> str | None:
-    for alias, model_id, name in CLAUDE_MODELS:
-        if token in {alias, model_id.lower(), name.lower().replace(" ", "")}:
+    key = _norm(token)
+    for alias, model_id, name in CLAUDE_MODELS:   # 清单里同名的以靠前的为准（opus5.5 → 1M 上下文版）
+        names = {alias, model_id, model_id.removeprefix("claude-"), name, name.split("·")[0]}
+        if key in {_norm(n) for n in names}:
             return model_id
     return None
 
 
 def _codex_model(token: str, catalog: list[dict]) -> str | None:
+    key = _norm(token)
     for m in catalog:
-        if token in {m["slug"].lower(), m["name"].lower()}:
+        if key in {_norm(m["slug"]), _norm(m["name"])}:
             return m["slug"]
     return None
 

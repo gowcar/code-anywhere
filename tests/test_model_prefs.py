@@ -25,6 +25,13 @@ class ParseTests(unittest.TestCase):
         req = model_prefs.parse(["max"], "claude", CATALOG)
         self.assertEqual((req.engine, req.model, req.effort), (None, None, "max"))
 
+    def test_lenient_model_names(self):
+        catalog = [{"slug": "gpt-5.6-terra", "name": "GPT-5.6-Terra", "efforts": ["medium"], "default": "medium"}]
+        self.assertEqual(model_prefs.parse(["opus5.5"], "claude", catalog).model, "claude-opus-5-5[1m]")
+        self.assertEqual(model_prefs.parse(["Sonnet", "5"][:1], "claude", catalog).model, "claude-sonnet-5")
+        self.assertEqual(model_prefs.parse(["haiku4.5"], "claude", catalog).model, "claude-haiku-4-5-20251001")
+        self.assertEqual(model_prefs.parse(["gpt5.6terra"], "claude", catalog).model, "gpt-5.6-terra")
+
     def test_rejections(self):
         cases = [(["foo"], "不认识"), (["claude", "gpt-6-sol"], "Codex 的模型"),
                  (["opus", "workspace"], "权限只能是"), (["gpt-5.5", "ultra"], "不可用"),
