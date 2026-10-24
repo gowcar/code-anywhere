@@ -21,6 +21,17 @@ GITHUB_TOKEN_FILE = Path.home() / ".config" / "github-token"
 
 
 PLATFORM_FILE = Path.home() / ".config" / "code-anywhere" / "issue-platform"   # scripts/issue-desk-config 写入
+GITLAB_HOST_FILE = Path.home() / ".config" / "code-anywhere" / "gitlab-host"
+
+
+def gitlab_host() -> str:
+    """GitLab 域名：环境变量 GITLAB_HOST，否则配置 issue 流程时记下的；没有就报错，不猜。"""
+    host = os.getenv("GITLAB_HOST", "").strip()
+    if not host and GITLAB_HOST_FILE.exists():
+        host = GITLAB_HOST_FILE.read_text().strip()
+    if not host:
+        raise FileNotFoundError("没有配置 GitLab 域名")
+    return host
 
 
 def platform() -> str:
@@ -151,7 +162,7 @@ def verify_hint(notes: list[dict]) -> str | None:
 def fetch_open_issues(host: str | None = None) -> list[dict]:
     if platform() == "github":
         return _gh_fetch_open()
-    host = host or os.getenv("GITLAB_HOST", "git.garena.com")
+    host = host or gitlab_host()
     token = TOKEN_FILE.read_text().strip()
     issues, page = [], 1
     while True:
@@ -168,7 +179,7 @@ def fetch_open_issues(host: str | None = None) -> list[dict]:
 
 
 def _write(method: str, path: str, host: str | None = None, **params) -> dict:
-    host = host or os.getenv("GITLAB_HOST", "git.garena.com")
+    host = host or gitlab_host()
     token = TOKEN_FILE.read_text().strip()
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(f"https://{host}/api/v4/{path}", data=data, method=method,
@@ -181,7 +192,7 @@ def get_issue(project_id: int, iid: int) -> dict:
     if platform() == "github":
         full = _gh_full(project_id)
         return _gh_normalize(_gh("GET", f"repos/{full}/issues/{iid}"), full)
-    host = os.getenv("GITLAB_HOST", "git.garena.com")
+    host = gitlab_host()
     return _get(host, TOKEN_FILE.read_text().strip(), f"projects/{project_id}/issues/{iid}")
 
 

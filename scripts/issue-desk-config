@@ -77,6 +77,10 @@ def main() -> None:
     config = Path.home() / ".config/code-anywhere"
     config.mkdir(parents=True, exist_ok=True)
     (config / "issue-platform").write_text(args.platform + "\n")
+    if args.platform == "gitlab":
+        if not args.gitlab_host:
+            sys.exit("GitLab 需要 --gitlab-host")
+        (config / "gitlab-host").write_text(args.gitlab_host + "\n")
     for repo in dict.fromkeys(repos):
         ensure_labels(args.platform, args.gitlab_host, repo)
     text = (REPO / "provision/templates/issue-desk.CLAUDE.md").read_text()
