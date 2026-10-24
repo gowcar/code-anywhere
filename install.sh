@@ -11,14 +11,14 @@ REPOS=("${CODE_ANYWHERE_REPO:-}" "https://github.com/gowcar/code-anywhere.git" "
 command -v git >/dev/null || { echo "需要 git：macOS 运行 xcode-select --install，Linux 用包管理器安装 git 后重试。" >&2; exit 1; }
 
 if [ -d "$DIR/.git" ]; then
-  echo "更新 $DIR …"
+  echo "更新 ${DIR} …"
   git -C "$DIR" pull --ff-only
 else
   mkdir -p "$(dirname "$DIR")"
   cloned=
   for url in "${REPOS[@]}"; do
     [ -n "$url" ] || continue
-    echo "下载 code-anywhere（$url）…"
+    echo "下载 code-anywhere（${url}）…"
     if GIT_TERMINAL_PROMPT=0 git clone -q "$url" "$DIR" 2>/dev/null; then cloned=1; break; fi
   done
   [ -n "$cloned" ] || { echo "拉不到代码：这台机器没有仓库的访问权限（私有仓库需要先配好 GitHub 的 SSH 钥匙）。" >&2; exit 1; }
