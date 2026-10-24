@@ -763,8 +763,19 @@ STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": 
          "issues": step_issues, "service": step_service, "verify": step_verify}
 
 
+def ensure_common_paths() -> None:
+    """ssh 远程执行、launchd 等非登录环境的 PATH 里常常没有 Homebrew 和 ~/.local/bin，
+    会把已经装好的 tmux、node 误判为缺失，生成的服务 PATH 也会缺目录（2026-10-24 Alan 的 Mac）。"""
+    extra = [HOME / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"), HOME / ".local" / "share" / "node" / "bin"]
+    current = os.environ.get("PATH", "").split(":")
+    missing = [str(p) for p in extra if p.is_dir() and str(p) not in current]
+    if missing:
+        os.environ["PATH"] = ":".join(missing + current)
+
+
 def main():
     global CHECK_ONLY
+    ensure_common_paths()
     parser = argparse.ArgumentParser(description="code-anywhere 安装 / 自检")
     parser.add_argument("--check", action="store_true", help="只检查，不做任何修改")
     parser.add_argument("--yes", "-y", action="store_true", help="所有安装与写入都默认同意")
