@@ -307,6 +307,21 @@ _bot = None
 _tg_app = None
 
 
+def _spawn_rotation(session_id: str, cwd: str, topic_id, path: str) -> None:
+    """一轮结束：后台推进自动换新会话，不阻塞读记录。"""
+    pane = (terminal_sessions.get(session_id) or {}).get("tmux_pane")
+    if not pane or not cwd:
+        return
+    from src import rotation
+
+    async def run():
+        try:
+            await rotation.on_turn_end(session_id, cwd, topic_id, pane, path)
+        except Exception:
+            log.warning("[rotation] 推进失败 sid=%s", session_id, exc_info=True)
+    asyncio.create_task(run())
+
+
 def set_bot(bot, tg_app):
     global _bot, _tg_app
     _bot = bot
@@ -680,6 +695,12 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                 except json.JSONDecodeError:
                     continue
 
+                # 自动换新会话：压缩计数、一轮结束时推进交接（事件驱动，见 src/rotation.py）
+                from src import rotation
+                if rotation.is_compaction(event):
+                    rotation.on_compaction(session_id)
+                if rotation.is_turn_end(event, backend):
+                    _spawn_rotation(session_id, cwd, topic_id, path)
                 if backend == "codex":
                     lifecycle = turn_status.lifecycle(event)
                     if lifecycle:
@@ -694,6 +715,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                             stop_typing(topic_id)
                         if current.get("activity") == "idle":  # 正常完成才标 👌；失败/中断保持 👀
                             liveness.turn_finished(topic_id)
+                            _spawn_rotation(session_id, cwd, topic_id, path)
                     event = backends.normalize_codex(event)
                     if event is None:
                         continue

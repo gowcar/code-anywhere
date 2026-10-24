@@ -318,6 +318,33 @@ async def _on_stopped_generation(update: Update, context: ContextTypes.DEFAULT_T
     await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text)
 
 
+async def clear_session(cwd: str) -> tuple[bool, str]:
+    """清空项目会话的上下文（Claude /clear、Codex /new）。会话忙时不动。/clear 指令与自动换新会话共用。"""
+    from src.abort import claude_running, claude_input, codex_running, codex_input
+    async with _project_locks.setdefault(cwd, asyncio.Lock()):
+        backend = backends.get_backend(cwd)
+        pane = await _find_pane_for_project(cwd)
+        if not pane:
+            return False, "这个项目没有运行中的终端，下一条消息会开新会话，无需清理。"
+        screen = await _capture_pane(pane)
+        if claude_running(screen) or codex_running(screen):
+            return False, "会话正在干活，没有清理。要清理请先 /abort 或等它做完。"
+        command, read_input = ("/new", codex_input) if backend == "codex" else ("/clear", claude_input)
+        await backends.command("tmux", "send-keys", "-t", pane, "-l", command)
+        await asyncio.sleep(0.5)
+        for _ in range(3):  # 第一次回车可能只是在命令补全菜单里选中，以输入框清空为准
+            await backends.command("tmux", "send-keys", "-t", pane, "Enter")
+            await asyncio.sleep(1.5)
+            if read_input(await _capture_pane(pane)) != command:
+                break
+    topic = projects.get_topic(cwd)
+    if topic:
+        from src import liveness
+        liveness.note_abort(topic)  # 清掉本轮残留的卡片状态
+    log.info("[clear] %s pane=%s backend=%s", Path(cwd).name, pane, backend)
+    return True, command
+
+
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/clear：清空当前 Thread 对应会话的上下文（Claude 执行 /clear，Codex 执行 /new）。会话忙时拒绝。
     会话的长期记忆在 recon/PROGRESS.md 外脑里，清理后新上下文会先读它接续。"""
@@ -327,30 +354,12 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cwd:
         await update.message.reply_text("请在项目 Thread 里使用 /clear")
         return
-    from src.abort import claude_running, claude_input, codex_running, codex_input
-    async with _project_locks.setdefault(cwd, asyncio.Lock()):
-        backend = backends.get_backend(cwd)
-        pane = await _find_pane_for_project(cwd)
-        if not pane:
-            await update.message.reply_text("这个项目没有运行中的终端，下一条消息会开新会话，无需清理。")
-            return
-        screen = await _capture_pane(pane)
-        if claude_running(screen) or codex_running(screen):
-            await update.message.reply_text("会话正在干活，没有清理。要清理请先 /abort 或等它做完。")
-            return
-        command, read_input = ("/new", codex_input) if backend == "codex" else ("/clear", claude_input)
-        await backends.command("tmux", "send-keys", "-t", pane, "-l", command)
-        await asyncio.sleep(0.5)
-        for _ in range(3):  # 第一次回车可能只是在命令补全菜单里选中，以输入框清空为准
-            await backends.command("tmux", "send-keys", "-t", pane, "Enter")
-            await asyncio.sleep(1.5)
-            if read_input(await _capture_pane(pane)) != command:
-                break
-    from src import liveness
-    liveness.note_abort(update.message.message_thread_id or update.message.chat_id)  # 清掉本轮残留的卡片状态
-    log.info("[clear] %s pane=%s backend=%s", Path(cwd).name, pane, backend)
+    ok, detail = await clear_session(cwd)
+    if not ok:
+        await update.message.reply_text(detail)
+        return
     await update.message.reply_text(
-        f"🧹 已清空 {Path(cwd).name} 的上下文（{command}）。下一条消息会在新上下文里处理；"
+        f"🧹 已清空 {Path(cwd).name} 的上下文（{detail}）。下一条消息会在新上下文里处理；"
         "项目外脑 recon/PROGRESS.md 会被先读入接续进度。", parse_mode=None)
 
 
