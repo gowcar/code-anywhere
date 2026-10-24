@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# issue-platform —— 打印本机 issue 流程用的平台：github 或 gitlab
+# 读 ~/.config/code-anywhere/issue-platform（配置 issue 流程时写入）；没有就看 GitLab 令牌是否存在
+f="$HOME/.config/code-anywhere/issue-platform"
+if [ -s "$f" ]; then tr -d '[:space:]' < "$f"; echo; elif [ -f "$HOME/.config/gitlab-token" ]; then echo gitlab; else echo github; fi

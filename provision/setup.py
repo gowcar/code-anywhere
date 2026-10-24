@@ -54,9 +54,9 @@ def warn(msg):
 def ask(question: str, default: bool = True) -> bool:
     if CHECK_ONLY:
         return False
-    if ASSUME_YES:
-        print(f"  ? {question} → 是（--yes）")
-        return True
+    if ASSUME_YES:  # 只自动同意默认为“是”的项；覆盖用户已有文件这类默认“否”的照样跳过
+        print(f"  ? {question} → {'是' if default else '否'}（--yes）")
+        return default
     hint = "[Y/n]" if default else "[y/N]"
     answer = input(f"  ? {question} {hint} ").strip().lower()
     return default if not answer else answer in {"y", "yes", "是"}
@@ -366,8 +366,9 @@ def step_python():
 
 
 def step_tools():
-    """个人工具：t / tmux-tui / cc / gitlab-upload / issue-images → ~/.local/bin，tmux.conf → ~/.tmux.conf"""
-    targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "gitlab-upload", "issue-images")}
+    """个人工具：t / tmux-tui / cc / issue-upload / issue-images（GitHub 与 GitLab）→ ~/.local/bin，tmux.conf → ~/.tmux.conf"""
+    targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "issue-platform", "issue-upload", "issue-images",
+                                             "gitlab-upload", "gitlab-issue-images")}
     targets["tmux.conf"] = HOME / ".tmux.conf"
     for name, target in targets.items():
         source = REPO / "tools" / name

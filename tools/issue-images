@@ -1,23 +1,38 @@
-#!/usr/bin/env bash
-# issue-images <group/repo> <issue 编号> —— 列出 issue 正文与评论里的图片在本机的原件路径
-# 原件由 gitlab-upload 存在 ~/.local/share/issue-files/；本机没有的给出网页链接（需浏览器登录查看）
-set -euo pipefail
-[ $# -eq 2 ] || { echo "用法: issue-images <group/repo> <issue 编号>" >&2; exit 2; }
-host=${GITLAB_HOST:-git.garena.com}; repo=$1; iid=$2
-store=${ISSUE_FILES:-$HOME/.local/share/issue-files}
-project=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$repo")
-{ GITLAB_HOST=$host glab api "projects/$project/issues/$iid" ; GITLAB_HOST=$host glab api "projects/$project/issues/$iid/notes?per_page=100"; } \
-  | python3 -c '
-import json, re, sys, os
-store, host, repo = sys.argv[1:4]
-text = sys.stdin.read()
-seen = []
-for secret, name in re.findall(r"/uploads/([0-9a-f]{32})/([^)\s\"\\\\]+)", text):
-    if (secret, name) in seen:
+#!/usr/bin/env python3
+"""issue-images <owner/repo> <issue 编号> —— 列出 issue 正文与评论里的图片在本机的原件路径（GitLab / GitHub）。"""
+import json, os, re, shutil, subprocess, sys, urllib.request
+from pathlib import Path
+
+if len(sys.argv) != 3:
+    sys.exit("用法: issue-images <owner/repo> <issue 编号>")
+here = Path(__file__).resolve().parent
+platform = subprocess.run([str(here / "issue-platform")], capture_output=True, text=True).stdout.strip()
+if platform != "github":
+    os.execv(str(here / "gitlab-issue-images"), [str(here / "gitlab-issue-images"), *sys.argv[1:]])
+
+repo, number = sys.argv[1:]
+token_file = Path.home() / ".config/github-token"
+token = token_file.read_text().strip() if token_file.exists() else subprocess.run(
+    [shutil.which("gh") or "gh", "auth", "token"], capture_output=True, text=True).stdout.strip()
+
+
+def api(path):
+    req = urllib.request.Request(f"https://api.github.com/{path}",
+                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+text = (api(f"repos/{repo}/issues/{number}").get("body") or "") + "\n" + "\n".join(
+    c.get("body") or "" for c in api(f"repos/{repo}/issues/{number}/comments?per_page=100"))
+store = Path(os.getenv("ISSUE_FILES", Path.home() / ".local/share/issue-files")) / "github"
+found = []
+for url in re.findall(r"https://github\.com/[^\s)\"']+|https://(?:user-images|private-user-images)\.githubusercontent\.com/[^\s)\"']+", text):
+    if url in found:
         continue
-    seen.append((secret, name))
-    local = os.path.join(store, secret, name)
-    print(local if os.path.exists(local) else f"（本机无原件，需网页登录查看）https://{host}/{repo}/uploads/{secret}/{name}")
-if not seen:
+    found.append(url)
+    match = re.search(r"/blob/issue-assets/(issue-assets/[^?\s)]+)", url)
+    local = store / match.group(1) if match else None
+    print(local if local and local.exists() else f"（本机无原件，可用共享浏览器打开）{url}")
+if not found:
     print("该 issue 没有图片附件")
-' "$store" "$host" "$repo"
