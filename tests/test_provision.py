@@ -76,6 +76,18 @@ class AvatarTests(unittest.TestCase):
         self.assertTrue(setup.AVATAR.exists())
 
 
+class UninstallTests(unittest.TestCase):
+    def test_never_stops_a_service_installed_elsewhere(self):
+        # 临时 HOME 下卸载时，不能按服务名把机器上真正在跑的桥接停掉（2026-10-24 事故）
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as home, patch.object(setup, "HOME", Path(home)), \
+             patch.object(setup, "BIN", Path(home) / ".local/bin"), patch.object(setup, "IS_MAC", False), \
+             patch.object(setup, "which", return_value=None), patch.object(setup, "run") as run:
+            setup.uninstall()
+        self.assertFalse(any("systemctl" in c.args[0] for c in run.call_args_list))
+
+
 class RenderTests(unittest.TestCase):
     def test_service_unit_has_no_placeholders(self):
         unit = setup.render("code-anywhere.service", REPO="/r", PATH="/p")

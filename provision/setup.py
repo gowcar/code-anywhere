@@ -772,6 +772,71 @@ STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": 
          "issues": step_issues, "service": step_service, "verify": step_verify}
 
 
+def uninstall() -> None:
+    """卸载 code-anywhere 装到这台机器上的东西（装了一半也能清理）。只删自己装的；用户数据目录保留并告知。"""
+    print(f"卸载 code-anywhere：{REPO}\n")
+    uid = str(os.getuid())
+    if IS_MAC:
+        plist = HOME / "Library" / "LaunchAgents" / "com.code-anywhere.plist"
+        if plist.exists() and str(REPO) in plist.read_text():   # 只停这份代码装的服务
+            run(["launchctl", "bootout", f"gui/{uid}", str(plist)])
+            plist.unlink()
+            ok("已停止并删除常驻服务（launchd）")
+        data = HOME / ".local" / "share" / "code-anywhere" / "browser"
+        for pid_file in data.glob("slot-*.pid") if data.exists() else []:
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(pid_file.read_text()), 15)
+            pid_file.unlink(missing_ok=True)
+    else:
+        # 只停这份代码装的服务：看服务文件确实在本用户目录下且指向本仓库。不能只按服务名判断——
+        # 用临时 HOME 测试卸载时曾把机器上真正在跑的桥接停掉（2026-10-24）
+        unit = HOME / ".config" / "systemd" / "user" / "code-anywhere.service"
+        if unit.exists() and str(REPO) in unit.read_text():
+            run(["systemctl", "--user", "disable", "--now", "code-anywhere"])
+            unit.unlink(missing_ok=True)
+            run(["systemctl", "--user", "daemon-reload"])
+            for slot in range(1, 5):
+                run(["systemctl", "--user", "stop", f"ca-browser-{slot}"])
+            ok("已停止并删除常驻服务（systemd）")
+    settings = HOME / ".claude" / "settings.json"
+    if settings.exists() and str(REPO / "hooks") in settings.read_text():
+        sys.path.insert(0, str(REPO / "hooks"))
+        import install as hook_install
+        with contextlib.redirect_stdout(io.StringIO()):
+            hook_install.uninstall()
+        ok("已从 ~/.claude/settings.json 移除 code-anywhere 的 hooks（其他设置不动）")
+    for name in ("local-sessions", "browser"):
+        if which("claude") and run([which("claude"), "mcp", "get", name]).returncode == 0:
+            run([which("claude"), "mcp", "remove", "--scope", "user", name])
+            ok(f"已从 Claude 注销 MCP：{name}")
+        config = HOME / ".codex" / "config.toml"
+        if which("codex") and config.exists() and f"[mcp_servers.{name}]" in config.read_text():
+            run([which("codex"), "mcp", "remove", name])
+            ok(f"已从 Codex 注销 MCP：{name}")
+    for target in (HOME / ".claude" / "CLAUDE.md", HOME / ".codex" / "AGENTS.md"):
+        if target.exists() and BEGIN in target.read_text():
+            text = target.read_text()
+            start, end = text.index(BEGIN), text.index(END) + len(END)
+            target.write_text((text[:start].rstrip("\n") + "\n" + text[end:].lstrip("\n")).strip("\n") + "\n")
+            ok(f"已从 {target} 删除 code-anywhere 的规则块（其他内容不动）")
+    for name in OWN_TOOLS + CONVENIENCE_TOOLS:   # 只删和仓库版本一样的（即我们装的）
+        target = BIN / name
+        if target.exists() and target.read_bytes() == (REPO / "tools" / name).read_bytes():
+            target.unlink()
+            ok(f"已删除 {target}")
+    for root in (HOME / ".claude" / "skills", HOME / ".codex" / "skills"):
+        if (root / "shared-browser").exists():
+            shutil.rmtree(root / "shared-browser")
+            ok(f"已删除技能 {root / 'shared-browser'}")
+    (HOME / ".config" / "code-anywhere" / "repo").unlink(missing_ok=True)
+    data = HOME / ".local" / "share" / "code-anywhere"
+    print()
+    if data.exists():
+        info(f"保留了数据目录 {data}（本地 issue、共享浏览器的登录状态、Playwright MCP）；不要了就删除它")
+    info(f"最后删除代码目录即可：rm -rf {REPO}")
+    print("\n卸载完成 ✓")
+
+
 def ensure_common_paths() -> None:
     """ssh 远程执行、launchd 等非登录环境的 PATH 里常常没有 Homebrew 和 ~/.local/bin，
     会把已经装好的 tmux、node 误判为缺失，生成的服务 PATH 也会缺目录（2026-10-24 Alan 的 Mac）。"""
@@ -790,7 +855,11 @@ def main():
     parser.add_argument("--ask", action="store_true", help="逐项询问（默认不问：安全的直接做，会改动你已有文件的跳过）")
     parser.add_argument("--yes", "-y", action="store_true", help=argparse.SUPPRESS)   # 兼容旧用法，现在本来就不问
     parser.add_argument("--only", help="只跑这些步骤（逗号分隔）：" + ",".join(STEPS))
+    parser.add_argument("--uninstall", action="store_true", help="卸载 code-anywhere 装到这台机器上的东西（装了一半也能清理）")
     args = parser.parse_args()
+    if args.uninstall:
+        uninstall()
+        return
     CHECK_ONLY = args.check
     global INTERACTIVE
     INTERACTIVE = args.ask

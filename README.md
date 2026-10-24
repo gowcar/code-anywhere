@@ -28,6 +28,11 @@ curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.s
 ```
 全程只在两处需要你：粘贴 bot token，在和 bot 的私聊里随便发一句话（自动识别你的账号，只允许你本人用）；Claude / Codex 没登录时会提示你登录。其余（依赖、服务、MCP、技能、规则）全自动，不会问你“要不要装”，也不会覆盖你已有的配置。可以反复执行，`./setup --check` 只检查不改动。
 
+卸载（装了一半也能清理干净；只删 code-anywhere 自己装的东西，你的其他配置不动）：
+```sh
+curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.sh | bash -s -- --uninstall
+```
+
 **4. 开始用**：私聊里会自动出现两个内置 Thread：**code-anywhere**（总体协调）和 **issue-desk**（反馈问题）。新项目发 `/new 项目名`（加 `codex` 用 Codex）。
 
 **5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**，比如“配置 issue 流程”（GitHub 或 GitLab：在 issue-desk 里口头提问题，修好后 `/issues` 点按钮验收）、“用自己的隧道做远程查看”。
