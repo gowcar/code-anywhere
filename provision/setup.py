@@ -377,7 +377,7 @@ def step_python():
             capture=False)
 
 
-OWN_TOOLS = ("ca-config", "issue-platform", "issue-upload", "issue-images", "local-issue", "gitlab-upload", "gitlab-issue-images")
+OWN_TOOLS = ("ca", "ca-config", "issue-platform", "issue-upload", "issue-images", "local-issue", "gitlab-upload", "gitlab-issue-images")
 CONVENIENCE_TOOLS = ("t", "tmux-tui")   # 电脑上挑选 tmux 会话的小工具；对方已有同名命令就保留对方的
 
 
@@ -759,8 +759,17 @@ def step_service():
         target = HOME / ".config" / "systemd" / "user" / "code-anywhere.service"
         content = render("code-anywhere.service", **values)
     current = target.read_text() if target.exists() else ""
+    head = run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    stamp = HOME / ".local" / "share" / "code-anywhere" / "service-version"   # 服务当前跑的是哪个版本
     if current == content:
         ok(f"服务配置已是最新：{target}")
+        running = stamp.read_text().strip() if stamp.exists() else ""
+        if head and running != head and not CHECK_ONLY:   # 升级拉了新代码：重启服务才会用上
+            if IS_MAC:
+                run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.code-anywhere"])
+            else:
+                run(["systemctl", "--user", "restart", "code-anywhere"])
+            ok(f"代码已更新（{running or '未知'} → {head}），已重启服务")
     else:
         warn(f"服务配置{'需要更新' if current else '不存在'}：{target}")
         if not ask("写入服务配置并（重新）启动服务？"):
@@ -776,6 +785,9 @@ def step_service():
             run(["systemctl", "--user", "enable", "code-anywhere"])
             run(["systemctl", "--user", "restart", "code-anywhere"], capture=False)
         ok("服务已启动")
+    if head and not CHECK_ONLY:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(head + "\n")
     if not IS_MAC:
         user = os.environ.get("USER") or getpass.getuser()
         if "Linger=yes" in (run(["loginctl", "show-user", user, "-p", "Linger"]).stdout or ""):

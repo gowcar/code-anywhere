@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# ca —— code-anywhere 命令行
+#   ca upgrade     升级到最新版（拉代码、补装缺的、自动重启服务）
+#   ca status      版本、服务是否在跑、接管了几个会话
+#   ca doctor      全面体检：依赖、配置、服务，并让 Claude / Codex 各真的回答一句
+#   ca config      修改配置文件（show 只看状态，path 打印位置）
+#   ca logs        实时看服务日志（Ctrl+C 退出）
+#   ca restart     重启服务
+#   ca uninstall   卸载（只删 code-anywhere 自己装的东西）
+set -euo pipefail
+
+REPO=$(cat "$HOME/.config/code-anywhere/repo" 2>/dev/null || true)
+[ -n "${REPO}" ] && [ -d "${REPO}" ] || REPO="$HOME/workspace/code-anywhere"
+CONFIG="${CODE_ANYWHERE_CONFIG:-$HOME/.config/code-anywhere/config.env}"
+PORT=$(grep -E '^BOT_PORT=' "${CONFIG}" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'); PORT=${PORT:-5000}
+
+restart() {
+  if [ "$(uname)" = Darwin ]; then launchctl kickstart -k "gui/$(id -u)/com.code-anywhere"
+  else systemctl --user restart code-anywhere; fi
+}
+
+health() { curl -s -m 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null || true; }
+
+case "${1:-help}" in
+  upgrade)
+    exec bash "${REPO}/install.sh" ;;
+  status)
+    echo "版本：$(git -C "${REPO}" log -1 --format='%h %s (%cd)' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || echo 未知)"
+    echo "目录：${REPO}"
+    echo "配置：${CONFIG}"
+    h=$(health)
+    if [ -n "${h}" ]; then
+      echo "服务：运行中 $(printf '%s' "${h}" | python3 -c 'import json,sys; print("（接管 %s 个会话）" % json.load(sys.stdin).get("terminal_sessions", 0))')"
+    else
+      echo "服务：没有响应（ca logs 看原因，ca restart 重启）"
+    fi ;;
+  doctor)
+    cd "${REPO}" && ./setup --check || true
+    echo; echo "== 模型连通（会产生少量费用）"
+    "${REPO}/.venv/bin/python" "${REPO}/provision/setup.py" --only models ;;
+  config)
+    shift; exec "${REPO}/tools/ca-config" "$@" ;;
+  logs)
+    exec tail -n 50 -f "${REPO}/logs/code-anywhere.log" ;;
+  restart)
+    restart
+    for _ in $(seq 20); do sleep 1; [ -n "$(health)" ] && { echo "✓ 已重启"; exit 0; }; done
+    echo "⚠️ 重启后服务没有响应，ca logs 看原因"; exit 1 ;;
+  uninstall)
+    shift; exec bash "${REPO}/install.sh" --uninstall "$@" ;;
+  version|-v|--version)
+    git -C "${REPO}" log -1 --format='%h (%cd)' --date=short ;;
+  help|-h|--help|*)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
