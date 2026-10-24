@@ -42,44 +42,25 @@ def md_to_tg_html(text: str) -> str:
 
     text = re.sub(r'```(\w*)\n(.*?)```', _stash_code, text, flags=re.DOTALL)
 
-    # Markdown 表格 → <pre> 等宽格式（TG 不支持 <table>）
+    # Markdown 表格 → 一行一张小卡片（2026-10-24）：TG 不支持 <table>；等宽 <pre> 在手机上中英文对不齐、
+    # 每行折成几行，单元格里的粗体/代码也不渲染。卡片：第一列加粗作标题，其余列“列名：内容”各占一行。
     def _format_table(m):
-        lines = m.group(0).strip().split('\n')
         rows = []
-        for line in lines:
+        for line in m.group(0).strip().split('\n'):
             if re.match(r'^\|[\s\-:|]+$', line.strip()):
                 continue
-            cells = [c.strip() for c in line.strip().strip('|').split('|')]
-            rows.append(cells)
-        if not rows:
+            rows.append([c.strip() for c in line.strip().strip('|').split('|')])
+        if len(rows) < 2:
             return m.group(0)
-
-        def _display_width(s):
-            """中文字符算 2 宽度，英文算 1"""
-            w = 0
-            for c in s:
-                w += 2 if '\u4e00' <= c <= '\u9fff' or '\u3000' <= c <= '\u303f' else 1
-            return w
-
-        ncols = max(len(r) for r in rows)
-        col_widths = [0] * ncols
-        for row in rows:
-            for i, cell in enumerate(row):
-                if i < ncols:
-                    col_widths[i] = max(col_widths[i], _display_width(cell))
-        formatted = []
-        for ri, row in enumerate(rows):
-            parts = []
-            for i in range(ncols):
-                cell = row[i] if i < len(row) else ""
-                pad = col_widths[i] - _display_width(cell)
-                parts.append(cell + ' ' * pad)
-            formatted.append('  '.join(parts))
-            if ri == 0:
-                formatted.append('  '.join('─' * w for w in col_widths))
-        idx = len(code_blocks)
-        code_blocks.append(f'<pre>{html.escape(chr(10).join(formatted))}</pre>')
-        return f"\x00CODEBLOCK{idx}\x00"
+        header, cards = rows[0], []
+        for row in rows[1:]:
+            title = re.sub(r'^\*\*(.*)\*\*$', r'\1', row[0]) if row else ''
+            rest = [(header[i] if i < len(header) else '', cell) for i, cell in enumerate(row[1:], 1) if cell]
+            if len(header) == 2 and rest:
+                cards.append(f"**{title}**：{rest[0][1]}")
+            else:
+                cards.append('\n'.join([f"**{title}**"] + [f"{name}：{cell}" if name else cell for name, cell in rest]))
+        return '\n\n'.join(cards) + '\n'
 
     text = re.sub(r'(?:^\|.+\|$\n?){2,}', _format_table, text, flags=re.MULTILINE)
 
