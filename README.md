@@ -16,17 +16,15 @@ flowchart LR
 ## 快速开始（5 步）
 
 **1. 准备好这些**
-- 一台 Linux 机器（Ubuntu / Debian 最省事，能 `sudo` 装包更好；macOS 也行，但共享浏览器暂不支持）
-- 这台机器能拉这个仓库：仓库是私有的，把机器的 SSH 公钥加到有权限的 GitHub 账号（或加成仓库的 Deploy key）
+- 一台 Linux 机器或 Mac（Ubuntu / Debian 最省事；能 `sudo` 装包更好，没有也行）
 - Telegram 账号，以及 Claude 账号（订阅或 API key）；想用 Codex 再准备 ChatGPT 账号
 
 **2. 建一个新 bot**：Telegram 找 [@BotFather](https://t.me/BotFather) → `/newbot` → 记下 token。再发 `/mybots` → 选这个 bot → Bot Settings → **Threaded Mode** → 打开。
 > 一个 bot 同一时间只能被一台机器接收，新机器请用新 bot。
 
-**3. 安装**
+**3. 安装**（以后升级也是这一行，每次都拉最新代码）
 ```sh
-git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
-cd ~/workspace/code-anywhere && ./setup
+curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.sh | bash
 ```
 全程只在两处需要你：粘贴 bot token，在和 bot 的私聊里随便发一句话（自动识别你的账号，只允许你本人用）；Claude / Codex 没登录时会提示你登录。其余（依赖、服务、MCP、技能、规则）全自动，不会问你“要不要装”，也不会覆盖你已有的配置。可以反复执行，`./setup --check` 只检查不改动。
 

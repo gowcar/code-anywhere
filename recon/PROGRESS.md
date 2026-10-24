@@ -1,7 +1,7 @@
 # PROGRESS — code-anywhere 作战地图
 > 单一真相源。新 session 第一件事就读它。
 ## 📍 当前位置
-**2026-10-24 自动换新会话 🟡 已上线待首次真实触发**：压缩满 3 次（SESSION_ROTATE_AFTER_COMPACTIONS）→ 一轮结束时发交接消息（写 PROGRESS、回“交接完成：继续/无待办”）→ 下一轮结束 /clear 或 /new，有待办自动续做；事件驱动（Claude compact_boundary/turn_duration，Codex compacted/task_complete），状态 .session-rotation.json，对所有会话生效含 code-anywhere 自己。待：首次真实触发后看日志 [rotation] 验证。另：install.sh 一行安装已写，公开方式待用户定（直接公开 vs 另建干净公开仓库；历史含公司名/内网 IP/nas.im/fatwen 等）。
+**2026-10-24 自动换新会话 🟡 已上线待首次真实触发**：压缩满 3 次（SESSION_ROTATE_AFTER_COMPACTIONS）→ 一轮结束时发交接消息（写 PROGRESS、回“交接完成：继续/无待办”）→ 下一轮结束 /clear 或 /new，有待办自动续做；事件驱动（Claude compact_boundary/turn_duration，Codex compacted/task_complete），状态 .session-rotation.json，对所有会话生效含 code-anywhere 自己。待：首次真实触发后看日志 [rotation] 验证。另：用户决定仓库直接公开，README 改 curl 一行安装（等用户在 GitHub 改 Public 后验证）。
 **2026-10-24 digital-buddy 两个报错 🟢**：19:38 /model Codex→Claude，Claude 首次在该目录弹信任框未处理→restart failed；用户下一条消息被当回车选“退出”→Claude 退出、消息丢失、报未找到日志；19:40 ensure_pane 新开 %75（在 apex tmux 会话里）后正常。已修：model_switch 重启等待中自动接受信任框（3bd…）。遗留：旧 Codex %39 仍在跑（idle）待用户决定是否关；丢失的那条“能看到这个项目的状况吗？”需用户重发。
 **2026-10-24 本地 issue 🟢**：没有远端的项目也能走 issue 流程（local-issue，本机 SQLite，/issues 汇总）；有远端就一定用远端——再用 local-issue 时自动迁移没关闭的并要求改用 gh/glab（用户决定：不做定时扫描、不问是否迁移）。资产 src/local_issues.py、tools/local-issue、tests/test_local_issues.py。
 **2026-10-24 Alan Mac iOS 环境 🟡 自动进行中**：Xcode 26.3（Universal，Alan 为 2018 Intel MBP 最高 macOS 15，装不了 27.x）已装到 /Applications，许可协议与首次启动组件完成（用户在 Xcode 弹窗输密码），DevToolsSecurity 已开。权限：sshd-keygen-wrapper 屏幕录制/辅助功能/自动化(Safari)/完全磁盘访问已开；sudoers 免密未生效（不再需要）。Alan tmux `ca-setup:ios` 跑 ~/ca-setup-logs/ios-setup.sh：下载 iOS 26.3.1 模拟器（10.47GB，约 1.3MB/s，约 2 小时）→ 编译 ~/workspace/hello-world（XcodeGen 生成的 SwiftUI）→ 模拟器运行截图 hello-sim.png；会话内 cron 6ffc2912 每 :17/:47 检查。屏幕临时 1440×900，原配置 ~/ca-setup-logs/display-original.txt，完成后恢复。远程桌面入口：Cloudflare/lhr 隧道（tmux view 窗口、~/ca-setup-logs/cf-auto.pid）。用户说先不装 code-anywhere。公司证书（dev + 企业分发 p12）用户还在考虑，未导入。Alan 拉代码：只读部署钥匙 ~/.ssh/code_anywhere_deploy + ssh 别名 github-code-anywhere，`git clone github-code-anywhere:gowcar/code-anywhere.git` 已验证可读（10-24）。
@@ -189,6 +189,7 @@ log.exception("safe msg", exc_info=exc)                 → 安全（traceback �
 - ⚪ LLM 自动总结 session name（haiku，目前用户选择手动命名兜底）
 - ⚪ code-anywhere 自家 web admin（不依赖 runner-coach）
 ## 📒 决策日志
+- 2026-10-24 用户决策：code-anywhere 仓库直接公开（接受历史里的内部信息公开），安装方式改为 curl -fsSL …/install.sh | bash。
 - 2026-10-23 用户决策：Thread 名不缩写（撤销 >18 字符中间省略），只在末尾加状态灯，名字长短用户自己控制。
 - 2026-10-23 用户决策：共享浏览器池只按内存限制（可用<2 GiB 不启动），不受全局浏览器进程数阈值约束；其他会话自启浏览器仍按原规则；同时保留数量限制：槽位硬上限 4（默认 2）、每槽位最多 6 个标签页。
 - 2026-10-22 用户决策：私聊模式采用“唯一置底状态卡”（否决草稿气泡、消散汇总、固定官方图标、名字开头状态灯）；私聊不点表情、不发正在输入；紧急修复需要插队机制（待做）。

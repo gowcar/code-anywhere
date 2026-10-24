@@ -3,7 +3,7 @@
 一条命令完成 code-anywhere 的安装与自检，可反复执行：每一步先检查，缺什么才问你要不要补。
 
 ```sh
-git clone git@github.com:gowcar/code-anywhere.git ~/workspace/code-anywhere
+curl -fsSL https://raw.githubusercontent.com/gowcar/code-anywhere/main/install.sh | bash   # 首次安装 / 升级
 cd ~/workspace/code-anywhere
 ./setup            # 安装 / 修复：不问“要不要装”，安全的直接做，会改动你已有文件的跳过；只在要 bot token、登录时停下
 ./setup --check    # 只检查，不改任何东西
