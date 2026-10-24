@@ -19,13 +19,14 @@ cd ~/workspace/code-anywhere
 | python | 用 uv 建 `.venv`，装 `requirements-mcp.txt`（含 `requirements.txt`） |
 | tools | `tools/` 下的 `t`、`tmux-tui`、`cc`、`gitlab-upload` → `~/.local/bin`，`tmux.conf` → `~/.tmux.conf`；已有且不同的先备份 |
 | auth | Claude（`claude auth status` 或 `.env` 的 `ANTHROPIC_API_KEY`）、Codex（登录或 config.toml 网关） |
-| telegram | 验证 BOT_TOKEN（getMe）；你建群、开话题、设 bot 为管理员（含“管理话题”）并发一句话；自动识别 CHAT_ID 和你的 TG 用户 ID 写入 `.env`（ALLOWED_USERS 只放你自己） |
+| telegram | 验证 BOT_TOKEN（getMe）；默认私聊 Thread 模式：你在 BotFather 打开 Threaded Mode，再在和 bot 的私聊里发一句话，自动识别你的 TG 用户 ID 写入 `.env`（ALLOWED_USERS 只放你自己）。也兼容话题群组 |
 | hooks | Claude hooks 写入 `~/.claude/settings.json` |
-| mcp | local-sessions 注册到 Claude 用户级配置与 Codex |
+| mcp | local-sessions、browser（共享浏览器）注册到 Claude 用户级配置与 Codex |
+| browser | 共享浏览器：Playwright MCP、Chromium、Xvfb / x11vnc、远程查看（cloudflared、websockify、noVNC，免 sudo）、技能 shared-browser。仅 Linux |
 | rules | `provision/templates/global-rules.md` 写入 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 的标记块，不动其他内容 |
 | gitlab | 可选：令牌存 `~/.config/gitlab-token`（600）并登录 glab；创建 `~/workspace/issue-desk`（Sonnet 5 / medium / bypass） |
 | service | Linux：systemd 用户服务 + linger；macOS：launchd。PATH 按 claude/codex/node 实际位置生成，换 node 版本后重跑即可 |
-| verify | 健康检查，并可往群里发一条上线消息 |
+| verify | 健康检查，并可往 Telegram 发一条上线消息 |
 
 ## 注意
 
