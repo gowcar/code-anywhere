@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# local-issue —— 本地 issue（项目还没有 GitHub / GitLab 远端时用，子命令同 gh issue）。实现在 code-anywhere 仓库里
+# 不切换目录：省略 -R 时按当前目录找项目
+repo=$(cat "$HOME/.config/code-anywhere/repo" 2>/dev/null)
+[ -n "$repo" ] && [ -x "$repo/.venv/bin/python" ] || { echo "找不到 code-anywhere（~/.config/code-anywhere/repo），请重跑 ./setup" >&2; exit 2; }
+PYTHONPATH="$repo${PYTHONPATH:+:$PYTHONPATH}" exec "$repo/.venv/bin/python" -m src.local_issues "$@"

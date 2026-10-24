@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""issue-upload <owner/repo> <文件>... —— 上传图片等附件，输出可直接贴进 issue 的 markdown。
+"""issue-upload <owner/repo 或 local:<项目>> <文件>... —— 上传图片等附件，输出可直接贴进 issue 的 markdown。
 
 GitLab：转交 gitlab-upload。GitHub 没有上传附件的 API：存到仓库的 issue-assets 分支（没有就从默认分支建），
 贴 blob 链接（有仓库权限的人在网页上直接看到图）。原件另存 ~/.local/share/issue-files/github/，
@@ -11,7 +11,20 @@ from pathlib import Path
 if len(sys.argv) < 3:
     sys.exit("用法: issue-upload <owner/repo> <文件>...")
 here = Path(__file__).resolve().parent
-platform = subprocess.run([str(here / "issue-platform")], capture_output=True, text=True).stdout.strip()
+if sys.argv[1].startswith("local:"):
+    platform = "local"
+else:
+    platform = os.getenv("ISSUE_PLATFORM_OVERRIDE") or subprocess.run(
+        [str(here / "issue-platform"), "--default"], capture_output=True, text=True).stdout.strip()
+if platform == "local":   # 本地 issue：附件存本机，贴 local-issue-file:// 链接；迁移到远端时自动重新上传
+    store = Path(os.getenv("ISSUE_FILES", Path.home() / ".local/share/issue-files")) / "local"
+    store.mkdir(parents=True, exist_ok=True)
+    for name in sys.argv[2:]:
+        data = Path(name).read_bytes()
+        rel = f"{hashlib.sha256(data).hexdigest()[:12]}-{Path(name).name}"
+        (store / rel).write_bytes(data)
+        print(f"![{Path(name).name}](local-issue-file://{rel})")
+    sys.exit(0)
 if platform != "github":
     os.execv(str(here / "gitlab-upload"), [str(here / "gitlab-upload"), *sys.argv[1:]])
 

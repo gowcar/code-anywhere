@@ -47,8 +47,18 @@ def platform_name() -> str:
     return "GitHub" if platform() == "github" else "GitLab"
 
 
+def remote_configured() -> bool:
+    if platform() == "github":
+        return bool(_github_token())
+    return TOKEN_FILE.exists() and (bool(os.getenv("GITLAB_HOST")) or GITLAB_HOST_FILE.exists())
+
+
 def configured() -> bool:
-    return bool(_github_token()) if platform() == "github" else TOKEN_FILE.exists()
+    """远端配好了，或者已经有本地 issue（项目还没推到远端时也能用 /issues）。"""
+    if remote_configured():
+        return True
+    from src import local_issues
+    return local_issues.DB.exists()
 
 
 def _github_token() -> str:
@@ -159,7 +169,7 @@ def verify_hint(notes: list[dict]) -> str | None:
     return None
 
 
-def fetch_open_issues(host: str | None = None) -> list[dict]:
+def _remote_open_issues(host: str | None = None) -> list[dict]:
     if platform() == "github":
         return _gh_fetch_open()
     host = host or gitlab_host()
@@ -188,7 +198,7 @@ def _write(method: str, path: str, host: str | None = None, **params) -> dict:
         return json.load(resp)
 
 
-def get_issue(project_id: int, iid: int) -> dict:
+def _remote_get_issue(project_id: int, iid: int) -> dict:
     if platform() == "github":
         full = _gh_full(project_id)
         return _gh_normalize(_gh("GET", f"repos/{full}/issues/{iid}"), full)
@@ -196,31 +206,31 @@ def get_issue(project_id: int, iid: int) -> dict:
     return _get(host, TOKEN_FILE.read_text().strip(), f"projects/{project_id}/issues/{iid}")
 
 
-def note(project_id: int, iid: int, body: str) -> None:
+def _remote_note(project_id: int, iid: int, body: str) -> None:
     if platform() == "github":
         _gh("POST", f"repos/{_gh_full(project_id)}/issues/{iid}/comments", {"body": body})
         return
     _write("POST", f"projects/{project_id}/issues/{iid}/notes", body=body)
 
 
-def verify_pass(project_id: int, iid: int) -> dict:
-    note(project_id, iid, "✅ 用户在 TG 验证通过，关闭。")
+def _remote_verify_pass(project_id: int, iid: int) -> dict:
+    _remote_note(project_id, iid, "✅ 用户在 TG 验证通过，关闭。")
     if platform() == "github":
         return _gh_relabel(project_id, iid, ["agent:to-verify"], [], close="completed")
     return _write("PUT", f"projects/{project_id}/issues/{iid}", state_event="close",
                   remove_labels="agent:to-verify")
 
 
-def verify_fail(project_id: int, iid: int) -> dict:
-    note(project_id, iid, "↩️ 用户在 TG 验证未通过，退回待处理（原因见后续评论）。")
+def _remote_verify_fail(project_id: int, iid: int) -> dict:
+    _remote_note(project_id, iid, "↩️ 用户在 TG 验证未通过，退回待处理（原因见后续评论）。")
     if platform() == "github":
         return _gh_relabel(project_id, iid, ["agent:to-verify"], ["agent:todo"])
     return _write("PUT", f"projects/{project_id}/issues/{iid}",
                   remove_labels="agent:to-verify", add_labels="agent:todo")
 
 
-def abandon(project_id: int, iid: int) -> dict:
-    note(project_id, iid, "🗑 用户在 TG 决定放弃处理，关闭。")
+def _remote_abandon(project_id: int, iid: int) -> dict:
+    _remote_note(project_id, iid, "🗑 用户在 TG 决定放弃处理，关闭。")
     if platform() == "github":
         return _gh_relabel(project_id, iid, list(ACTION_LABELS), ["agent:wontfix"], close="not_planned")
     return _write("PUT", f"projects/{project_id}/issues/{iid}", state_event="close",
@@ -254,6 +264,8 @@ def owner_cwd(issue: dict) -> str | None:
     """issue 所在仓库对应的已绑定项目目录（按各项目 git 远端匹配；同仓库多个 worktree 取主目录）。"""
     import subprocess
     from src import projects
+    if issue.get("local_path"):
+        return issue["local_path"]
     repo = issue.get("references", {}).get("full", "").rpartition("#")[0]
     matches = []
     for cwd in projects.all_bindings().values():
@@ -358,7 +370,9 @@ def detail(issues: list[dict], project_id: int, iid: int):
     if state == "agent:to-verify":
         hint = issue.get("verify_hint")
         lines += ["", f"验证：{escape(hint)}" if hint else "⚠️ 负责会话还没写验证方法，可在 issue-desk 追问"]
-    lines += ["", f'<a href="{escape(issue["web_url"], quote=True)}">在 {platform_name()} 打开</a> · 第 {index + 1}/{len(items)} 个']
+    link = (f'<a href="{escape(issue["web_url"], quote=True)}">在 {platform_name()} 打开</a>' if issue.get("web_url")
+            else "本地 issue（项目还没推到远端）")
+    lines += ["", f"{link} · 第 {index + 1}/{len(items)} 个"]
     if state == "agent:to-verify":
         actions = [InlineKeyboardButton("✅ 通过", callback_data=f"is:pass:{key}", style="success"),
                    InlineKeyboardButton("↩️ 不通过", callback_data=f"is:fail:{key}", style="primary")]
@@ -379,3 +393,51 @@ def next_to_verify(issues: list[dict]) -> dict | None:
 
 def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width - 1] + "…"
+
+
+# ---------------------------------------------------------------- 本地 + 远端统一入口（project_id < 0 是本地 issue）
+
+def fetch_open_issues() -> list[dict]:
+    from src import local_issues
+    found = local_issues.open_issues() if local_issues.DB.exists() else []
+    if remote_configured():
+        found += _remote_open_issues()
+    return found
+
+
+def get_issue(project_id: int, iid: int) -> dict:
+    if project_id < 0:
+        from src import local_issues
+        return local_issues.get(project_id, iid)
+    return _remote_get_issue(project_id, iid)
+
+
+def note(project_id: int, iid: int, body: str) -> None:
+    if project_id < 0:
+        from src import local_issues
+        return local_issues.comment(project_id, iid, body)
+    return _remote_note(project_id, iid, body)
+
+
+def verify_pass(project_id: int, iid: int) -> dict:
+    if project_id < 0:
+        from src import local_issues
+        local_issues.comment(project_id, iid, "✅ 用户在 TG 验证通过，关闭。")
+        return local_issues.relabel(project_id, iid, ["agent:to-verify"], [], close="completed")
+    return _remote_verify_pass(project_id, iid)
+
+
+def verify_fail(project_id: int, iid: int) -> dict:
+    if project_id < 0:
+        from src import local_issues
+        local_issues.comment(project_id, iid, "↩️ 用户在 TG 验证未通过，退回待处理（原因见后续评论）。")
+        return local_issues.relabel(project_id, iid, ["agent:to-verify"], ["agent:todo"])
+    return _remote_verify_fail(project_id, iid)
+
+
+def abandon(project_id: int, iid: int) -> dict:
+    if project_id < 0:
+        from src import local_issues
+        local_issues.comment(project_id, iid, "🗑 用户在 TG 决定放弃处理，关闭。")
+        return local_issues.relabel(project_id, iid, list(ACTION_LABELS), ["agent:wontfix"], close="not_planned")
+    return _remote_abandon(project_id, iid)

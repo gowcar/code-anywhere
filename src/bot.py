@@ -608,7 +608,7 @@ async def _issues_callback(query, context, data: str):
                 await query.answer(f"{ref} 已放弃并关闭")
                 if was_doing:
                     result = await issues.notify_owner(
-                        issue, f"issue {issue['web_url']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
+                        issue, f"issue {issue['web_url'] or issue['references']['full']} 用户已决定放弃处理并关闭，请停止这项工作，不需要再提交改动。")
                     await query.message.reply_text(f"🗑 {ref} 已放弃并关闭；{result}")
         except Exception as exc:
             log.warning("[issues] 操作失败 %s %s: %s", action, ref, exc)
@@ -640,7 +640,7 @@ async def _handle_issue_reason(message) -> bool:
         issue = await asyncio.to_thread(issues.get_issue, project_id, iid)
         await asyncio.to_thread(issues.note, project_id, iid, f"↩️ 验证未通过的原因（用户在 TG 补充）：\n\n{reason}")
         result = await issues.notify_owner(
-            issue, f"issue 验证未通过：{issue['web_url']}，{reason[:120]}；请按全局规则「issue 处理」重新接手。")
+            issue, f"issue 验证未通过：{issue['web_url'] or issue['references']['full']}，{reason[:120]}；请按全局规则「issue 处理」重新接手。")
         await message.reply_text(f"已写进 {issues.short_ref(issue)}；{result}")
     except Exception as exc:
         log.warning("[issues] 记录原因失败: %s", exc)

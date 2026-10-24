@@ -8,6 +8,7 @@
   （GitLab 加 --platform gitlab --gitlab-host git.example.com）
 
 --repo 格式：仓库|用户可能的说法|标签（没有写 -）|负责会话（项目目录名）
+  还没推到远端的项目，仓库写 local:<项目目录名>（用本地 issue，推到远端后可在 TG 里一键迁移）
 做的事：记下平台（~/.config/code-anywhere/issue-platform）、在各仓库建好 agent:* 等标签、
 生成 ~/workspace/issue-desk/CLAUDE.md 与 AGENTS.md（已有的非占位版本先备份）。
 """
@@ -24,6 +25,14 @@ LABELS = {"agent:todo": "0e8a16", "agent:doing": "1d76db", "agent:to-verify": "f
 
 
 def commands(platform: str, host: str) -> dict:
+    if platform == "local":
+        return {"PLATFORM_NAME": "本地",
+                "CREATE_CMD": 'local-issue create -R <仓库> --title "<一句话标题>" --label "agent:todo,<标签>" --body "<正文>"',
+                "VIEW_CMD": "local-issue view <N> -R <仓库> --comments",
+                "LIST_CMD": "local-issue list -R $r --label agent:to-verify",
+                "COMMENT_CMD": "local-issue comment <N> -R <仓库> -b",
+                "CLOSE_CMD": "local-issue close <N> -R <仓库>",
+                "FAIL_CMD": "local-issue edit <N> -R <仓库> --remove-label agent:to-verify --add-label agent:todo"}
     if platform == "github":
         return {"PLATFORM_NAME": "GitHub",
                 "CREATE_CMD": 'gh issue create -R <仓库> --title "<一句话标题>" --label "agent:todo,<标签>" --body "<正文>"',
@@ -61,7 +70,8 @@ def ensure_labels(platform: str, host: str, repo: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--platform", choices=["github", "gitlab"], required=True)
+    parser.add_argument("--platform", choices=["github", "gitlab", "local"], default="local",
+                        help="远端平台；仓库全是 local:<目录名>（还没推到远端）时用 local")
     parser.add_argument("--gitlab-host", default="")
     parser.add_argument("--repo", action="append", required=True)
     parser.add_argument("--workspace", default=str(Path.home() / "workspace"))
@@ -82,7 +92,8 @@ def main() -> None:
             sys.exit("GitLab 需要 --gitlab-host")
         (config / "gitlab-host").write_text(args.gitlab_host + "\n")
     for repo in dict.fromkeys(repos):
-        ensure_labels(args.platform, args.gitlab_host, repo)
+        if not repo.startswith("local:"):   # 本地 issue 不需要建标签
+            ensure_labels(args.platform, args.gitlab_host, repo)
     text = (REPO / "provision/templates/issue-desk.CLAUDE.md").read_text()
     values = {**commands(args.platform, args.gitlab_host), "HOME": str(Path.home()),
               "REPO_TABLE": "\n".join(rows), "REPO_LIST": " ".join(dict.fromkeys(repos))}

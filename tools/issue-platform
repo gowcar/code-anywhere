@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
-# issue-platform —— 打印本机 issue 流程用的平台：github 或 gitlab
-# 读 ~/.config/code-anywhere/issue-platform（配置 issue 流程时写入）；没有就看 GitLab 令牌是否存在
-f="$HOME/.config/code-anywhere/issue-platform"
-if [ -s "$f" ]; then tr -d '[:space:]' < "$f"; echo; elif [ -f "$HOME/.config/gitlab-token" ]; then echo gitlab; else echo github; fi
+# issue-platform [目录] —— 这个项目的 issue 用哪个平台：github / gitlab / local
+#   在仓库目录里：看 git 远端（github.com → github，其他 → gitlab），没有远端 → local（本地 issue）
+#   issue-platform --default：不看目录，只看本机配置的远端平台（~/.config/code-anywhere/issue-platform）
+[ -n "${ISSUE_PLATFORM_OVERRIDE:-}" ] && { echo "$ISSUE_PLATFORM_OVERRIDE"; exit 0; }
+default() {
+  f="$HOME/.config/code-anywhere/issue-platform"
+  if [ -s "$f" ]; then tr -d '[:space:]' < "$f"; echo; elif [ -f "$HOME/.config/gitlab-token" ]; then echo gitlab; else echo github; fi
+}
+[ "${1:-}" = "--default" ] && { default; exit 0; }
+dir=${1:-.}
+if git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null)
+  if [ -z "$url" ]; then echo local
+  elif printf '%s' "$url" | grep -q 'github\.com'; then echo github
+  else echo gitlab; fi
+else
+  default
+fi

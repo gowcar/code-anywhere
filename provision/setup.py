@@ -368,7 +368,11 @@ def step_python():
 def step_tools():
     """个人工具：t / tmux-tui / cc / issue-upload / issue-images（GitHub 与 GitLab）→ ~/.local/bin，tmux.conf → ~/.tmux.conf"""
     targets = {name: BIN / name for name in ("t", "tmux-tui", "cc", "issue-platform", "issue-upload", "issue-images",
-                                             "gitlab-upload", "gitlab-issue-images")}
+                                             "local-issue", "gitlab-upload", "gitlab-issue-images")}
+    pointer = HOME / ".config" / "code-anywhere" / "repo"   # local-issue 等工具靠它找到仓库
+    if not CHECK_ONLY and (not pointer.exists() or pointer.read_text().strip() != str(REPO)):
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(REPO) + "\n")
     targets["tmux.conf"] = HOME / ".tmux.conf"
     for name, target in targets.items():
         source = REPO / "tools" / name

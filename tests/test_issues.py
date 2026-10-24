@@ -1,5 +1,6 @@
 """/issues summary formatting; no network."""
 import unittest
+from pathlib import Path
 
 from src import issues
 
@@ -92,7 +93,10 @@ class GitHubBackendTests(unittest.TestCase):
             if path.endswith("/comments?per_page=100"):
                 return [{"body": "验证方法：打开首页登录", "created_at": "2026-10-24T01:00:00Z"}]
             return {}
-        with patch.dict("os.environ", {"ISSUE_PLATFORM": "github"}), patch.object(self.issues, "_gh", fake_gh):
+        from src import local_issues
+        with patch.dict("os.environ", {"ISSUE_PLATFORM": "github"}), patch.object(self.issues, "_gh", fake_gh), \
+             patch.object(self.issues, "remote_configured", return_value=True), \
+             patch.object(local_issues, "DB", Path("/nonexistent/issues.sqlite3")):
             found = self.issues.fetch_open_issues()
             self.assertEqual(len(found), 1)                          # PR 不算 issue
             issue = found[0]

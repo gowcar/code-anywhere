@@ -8,6 +8,8 @@
 
 问：**“你的代码放在 GitHub 还是 GitLab？”** GitLab 再问域名（例如 `gitlab.example.com`）。
 
+项目还没推到任何远端也能用：仓库写成 `local:<项目目录名>`，issue 存在本机（`local-issue`），不需要第 2 步。等项目推到 GitHub / GitLab，下次处理它的 issue 时没关闭的会自动迁移过去，之后一律走远端。
+
 ## 2. 装命令行并登录
 
 - GitHub：没有 `gh` 就装（macOS `brew install gh`；Linux 有 sudo 用包管理器，没有就从 https://github.com/cli/cli/releases 下载到 `~/.local/bin`）。登录：

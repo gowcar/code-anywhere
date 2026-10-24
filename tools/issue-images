@@ -6,7 +6,18 @@ from pathlib import Path
 if len(sys.argv) != 3:
     sys.exit("用法: issue-images <owner/repo> <issue 编号>")
 here = Path(__file__).resolve().parent
-platform = subprocess.run([str(here / "issue-platform")], capture_output=True, text=True).stdout.strip()
+if sys.argv[1].startswith("local:"):
+    text = subprocess.run([str(here / "local-issue"), "view", sys.argv[2], "-R", sys.argv[1], "--comments"],
+                          capture_output=True, text=True).stdout
+    store = Path(os.getenv("ISSUE_FILES", Path.home() / ".local/share/issue-files")) / "local"
+    found = list(dict.fromkeys(re.findall(r"local-issue-file://([^)\s]+)", text)))
+    for rel in found:
+        print(store / rel)
+    if not found:
+        print("该 issue 没有图片附件")
+    sys.exit(0)
+platform = os.getenv("ISSUE_PLATFORM_OVERRIDE") or subprocess.run(
+    [str(here / "issue-platform"), "--default"], capture_output=True, text=True).stdout.strip()
 if platform != "github":
     os.execv(str(here / "gitlab-issue-images"), [str(here / "gitlab-issue-images"), *sys.argv[1:]])
 

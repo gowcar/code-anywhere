@@ -30,14 +30,15 @@
 
 ## issue 处理（GitHub / GitLab，2026-10-21 用户要求）
 
-用户通过专门的 issue-desk 会话把问题提成 issue，带 `agent:todo` 标签。平台看 `issue-platform` 命令的输出（`github` 用 `gh`，`gitlab` 用 `glab`，两者都在仓库主目录里按 git 远端自动找到仓库）。项目会话按下面方式处理：
+用户通过专门的 issue-desk 会话把问题提成 issue，带 `agent:todo` 标签。在仓库主目录运行 `issue-platform` 看用哪个平台：`github` 用 `gh`，`gitlab` 用 `glab`，`local`（项目还没推到远端）用 `local-issue`——子命令和参数与 `gh issue` 相同（create / list / view / comment / edit / close），编号形如 `local:<项目目录名>#N`。三者都在仓库主目录里自动找到仓库。有远端就一定用远端：项目推到远端后，再用 `local-issue` 时没关闭的会自动迁移过去，并提示改用 `gh` / `glab`。项目会话按下面方式处理：
 
 - **什么时候查**：收到 issue-desk 的一句话通知时，或者完成手头任务、准备停下来时，在仓库**主目录**查一次待办。同一仓库的其他 worktree 会话不处理 issue。
-  GitHub：`gh issue list --label agent:todo`；GitLab：`glab issue list --label agent:todo`
+  GitHub：`gh issue list --label agent:todo`；GitLab：`glab issue list --label agent:todo`；本地：`local-issue list --label agent:todo`
 - **接手**：先评论说明谁在处理，再把标签 `agent:todo` 改成 `agent:doing`：
   GitHub：`gh issue comment <N> -b "<会话名> 接手处理"`；`gh issue edit <N> --remove-label agent:todo --add-label agent:doing`
   GitLab：`glab issue note <N> -m "<会话名> 接手处理"`；`glab issue update <N> --unlabel agent:todo --label agent:doing`
-- **读 issue**：`gh issue view <N> --comments` / `glab issue view <N> --comments`；**看截图用 `issue-images <仓库> <N>`**，它直接给出本机原图路径（所有会话在同一台机器上），本机没有原件时用共享浏览器打开链接。
+  本地：`local-issue comment <N> -b "<会话名> 接手处理"`；`local-issue edit <N> --remove-label agent:todo --add-label agent:doing`
+- **读 issue**：`gh issue view <N> --comments` / `glab issue view <N> --comments` / `local-issue view <N> --comments`；**看截图用 `issue-images <仓库> <N>`**，它直接给出本机原图路径（所有会话在同一台机器上），本机没有原件时用共享浏览器打开链接。
 - **处理**：按项目原有纪律做（读 recon/PROGRESS、测试、发布授权边界不变）。issue 本身不构成发布、LIVE 写入或删除数据的授权。
 - **修完（等用户验证）**：推送分支；在 issue 里评论：改了什么、提交号与分支、**做不到或与原需求不同的部分**、用户怎么验证（装哪个版本 / 打开哪个页面）；评论里**必须有单独一行 `验证方法：<一句话写全前提和操作>`**，例如“验证方法：安装 iOS 0.2.67（需先删掉旧版重装），用正式账号登录，在 Chat 页点输入框后按住输入栏下拉”；需要重启、重新登录、清缓存、等部署等条件都写进这一行。TG 的 `/issues` 会把这一行显示给用户，条件变化（如发了新版本）就再发一条带新 `验证方法：` 行的评论，以最新一条为准。然后把 `agent:doing` 改成 `agent:to-verify`，并在 TG 用一句话告诉用户“#N 已修好待验证”。**不要自己关闭 issue**，提交信息里用 `Refs #N`，不要写 `Closes #N` / `Fixes #N`（会在合并时绕过用户验证自动关闭）。
 - **评论内容**：issue 对团队可见，评论里不要写服务器本地路径（`/home/...`、`/Users/...`）、令牌或会话 ID；需要附截图时用 `issue-upload <仓库> <文件>` 上传后贴它输出的 markdown。
