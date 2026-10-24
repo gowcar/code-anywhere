@@ -30,9 +30,9 @@ cd ~/workspace/code-anywhere && ./setup
 ```
 按提示走：粘贴 token → 打开和 bot 的私聊随便发一句话（自动识别你的账号，只允许你本人用）→ 按提示登录 Claude / Codex。其余（依赖、服务、MCP、技能、规则）全自动。可以反复执行，`./setup --check` 只检查不改动。
 
-**4. 开始用**：在和 bot 的私聊里发 `/new code-anywhere`，打开它自己的 Thread；新项目发 `/new 项目名`（加 `codex` 用 Codex）。
+**4. 开始用**：私聊里会自动出现两个内置 Thread：**code-anywhere**（总体协调）和 **issue-desk**（反馈问题）。新项目发 `/new 项目名`（加 `codex` 用 Codex）。
 
-**5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**，比如“接 GitLab issue 流程”（在 TG 里提需求、验收）、“用自己的隧道做远程查看”。
+**5. 想要更多能力，直接在 code-anywhere 的 Thread 里说**，比如“配置 issue 流程”（GitHub 或 GitLab：在 issue-desk 里口头提问题，修好后 `/issues` 点按钮验收）、“用自己的隧道做远程查看”。
 
 它会问你需要的东西，然后帮你配好。
 
@@ -62,7 +62,7 @@ cd ~/workspace/code-anywhere && ./setup
 | `/model` | 查看当前模型；`/model list` 列出全部；`/model claude sonnet high full` 一句切换引擎、模型、effort、权限，历史不丢 |
 | `/permissions` | Codex 权限：`full` / `workspace` / `read-only` |
 | `/status` | 所有会话的活动状态（进行中、空闲、失败） |
-| `/issues` | GitLab issue 按状态汇总，待验证的附验证方法；每条带按钮：✅ 通过 / ↩️ 不通过 / 🗑 放弃（见下文） |
+| `/issues` | issue（GitHub / GitLab）按状态汇总，待验证的附验证方法；每条带按钮：✅ 通过 / ↩️ 不通过 / 🗑 放弃（见下文） |
 | `/projects` `/sessions` | 项目列表、历史会话 |
 | `/trust` `/whoami` | 项目信任开关、你的 TG ID |
 
@@ -95,23 +95,23 @@ cd ~/workspace/code-anywhere && ./setup
 
 远程画面默认经 **Cloudflare 免费临时隧道**送到手机（`https://….trycloudflare.com`，不用注册、不用配置），用完即关、地址作废，画面还有一次性密码。想走自己的隧道（中转机或公网地址），在 code-anywhere 的 Thread 里说一声即可（Agent 手册：`docs/REMOTE-VIEW-SETUP.md`）。目前只支持 Linux。
 
-### 用 GitLab issue 管理反馈
+### 用 issue 管理反馈（GitHub / GitLab）
 
-`./setup` 可选配置 GitLab。之后会多一个 **issue-desk** 话题：
+内置的 **issue-desk** Thread 专门收问题。第一次用前，在 code-anywhere 的 Thread 里说“配置 issue 流程”，它会问你用 GitHub 还是 GitLab、接哪些仓库，然后帮你配好：
 
 ```mermaid
 flowchart LR
     you["你在 issue-desk 说<br/>“App 聊天界面滚动有问题”"] --> desk["issue-desk<br/>判断仓库、整理、附截图"]
-    desk -->|glab| gl[("GitLab issue<br/>agent:todo")]
+    desk -->|gh / glab| gl[("issue<br/>agent:todo")]
     desk -->|一句话通知| dev["对应项目会话"]
     dev -->|修复、评论、验证方法| gl2[("agent:to-verify")]
     gl2 -->|/issues 查看| you2["你验证后在 issue-desk 说<br/>“#1 验证通过”→ 关闭"]
 ```
 
-- issue-desk 维护一张**别名路由表**（“App”→ iOS 仓库，“服务端”→ 后端仓库……），在 `~/workspace/issue-desk/CLAUDE.md` 里随时改。
+- issue-desk 维护一张**别名路由表**（“App”→ App 仓库，“服务端”→ 后端仓库……），想加仓库或改说法，在 code-anywhere 里说一声。
 - 状态：`agent:todo` → `agent:doing` → `agent:to-verify` → 你验证后关闭；`agent:blocked` 表示需要你决定。
 - 在 TG 发 `/issues` 就能处理：点 **✅ 通过** 直接关闭；点 **↩️ 不通过** 退回待处理，并可直接回复原因（会写进 issue、通知负责会话）；不想做了点 **🗑 放弃**（二次确认）。负责会话按项目的 git 远端自动找到。
-- 截图会上传到 GitLab，同时在本机留原件，项目会话用 `issue-images <仓库> <编号>` 直接取。
+- 截图会附到 issue 里（GitHub 存在仓库的 `issue-assets` 分支），同时在本机留原件，项目会话用 `issue-images <仓库> <编号>` 直接取。
 
 ## 常见问题
 

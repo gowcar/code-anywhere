@@ -82,10 +82,18 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("{{", unit)
         self.assertIn("ExecStart=/r/.venv/bin/python -m src.main", unit)
 
-    def test_issue_desk_template_uses_home(self):
-        text = setup.render("issue-desk.CLAUDE.md", HOME="/h")
-        self.assertIn("/h/.codex/AGENTS.md", text)
+    def test_issue_desk_config_renders_template_completely(self):
+        # issue-desk 的规则由 scripts/issue-desk-config 按平台和仓库表生成，不能留占位符
+        import os, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as home:
+            subprocess.run([str(setup.REPO / "scripts" / "issue-desk-config"), "--platform", "github",
+                            "--repo", "alan/app|App|area:app|app", "--workspace", f"{home}/ws"],
+                           env={**os.environ, "HOME": home, "PATH": "/usr/bin:/bin"}, check=True, capture_output=True)
+            text = Path(home, "ws/issue-desk/CLAUDE.md").read_text()
         self.assertNotIn("{{", text)
+        self.assertIn(f"{home}/.codex/AGENTS.md", text)
+        self.assertIn("gh issue create -R", text)
+        self.assertIn("| App | `alan/app` | `area:app` | app |", text)
 
 
 class DependencyTests(unittest.TestCase):

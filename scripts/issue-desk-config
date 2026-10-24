@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""配置 issue 流程（Agent 问清楚用户之后，一条命令落地）。
+
+用法：
+  scripts/issue-desk-config --platform github \
+      --repo "alan/shop-app|App、iOS、手机上|area:app|shop-app" \
+      --repo "alan/shop-server|服务端、接口、数据不对|area:server|shop-server"
+  （GitLab 加 --platform gitlab --gitlab-host git.example.com）
+
+--repo 格式：仓库|用户可能的说法|标签（没有写 -）|负责会话（项目目录名）
+做的事：记下平台（~/.config/code-anywhere/issue-platform）、在各仓库建好 agent:* 等标签、
+生成 ~/workspace/issue-desk/CLAUDE.md 与 AGENTS.md（已有的非占位版本先备份）。
+"""
+import argparse
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+LABELS = {"agent:todo": "0e8a16", "agent:doing": "1d76db", "agent:to-verify": "fbca04", "agent:blocked": "b60205",
+          "agent:wontfix": "cccccc", "priority:urgent": "d93f0b"}
+
+
+def commands(platform: str, host: str) -> dict:
+    if platform == "github":
+        return {"PLATFORM_NAME": "GitHub",
+                "CREATE_CMD": 'gh issue create -R <仓库> --title "<一句话标题>" --label "agent:todo,<标签>" --body "<正文>"',
+                "VIEW_CMD": "gh issue view <N> -R <仓库> --comments",
+                "LIST_CMD": "gh issue list -R $r --label agent:to-verify",
+                "COMMENT_CMD": "gh issue comment <N> -R <仓库> -b",
+                "CLOSE_CMD": "gh issue close <N> -R <仓库>",
+                "FAIL_CMD": "gh issue edit <N> -R <仓库> --remove-label agent:to-verify --add-label agent:todo"}
+    prefix = f"GITLAB_HOST={host} " if host else ""
+    return {"PLATFORM_NAME": "GitLab",
+            "CREATE_CMD": f'{prefix}glab issue create -R <仓库> --title "<一句话标题>" --label "agent:todo,<标签>" --description "<正文>" --yes',
+            "VIEW_CMD": f"{prefix}glab issue view <N> -R <仓库> --comments",
+            "LIST_CMD": f"{prefix}glab issue list -R $r --label agent:to-verify",
+            "COMMENT_CMD": f"{prefix}glab issue note <N> -R <仓库> -m",
+            "CLOSE_CMD": f"{prefix}glab issue close <N> -R <仓库>",
+            "FAIL_CMD": f"{prefix}glab issue update <N> -R <仓库> --unlabel agent:to-verify --label agent:todo"}
+
+
+def ensure_labels(platform: str, host: str, repo: str) -> None:
+    cli = "gh" if platform == "github" else "glab"
+    if not shutil.which(cli):
+        print(f"  ⚠️ 没有 {cli}，跳过在 {repo} 建标签（装好并登录 {cli} 后重跑本命令）")
+        return
+    for name, color in LABELS.items():
+        if platform == "github":
+            cmd = ["gh", "label", "create", name, "-R", repo, "--color", color, "--force"]
+            env = None
+        else:
+            cmd = ["glab", "label", "create", "-R", repo, "--name", name, "--color", f"#{color}"]
+            env = {**__import__("os").environ, **({"GITLAB_HOST": host} if host else {})}
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if result.returncode and "already exists" not in (result.stdout + result.stderr):
+            print(f"  ⚠️ {repo} 建标签 {name} 失败：{(result.stderr or result.stdout).strip()[-200:]}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--platform", choices=["github", "gitlab"], required=True)
+    parser.add_argument("--gitlab-host", default="")
+    parser.add_argument("--repo", action="append", required=True)
+    parser.add_argument("--workspace", default=str(Path.home() / "workspace"))
+    args = parser.parse_args()
+    rows, repos = [], []
+    for spec in args.repo:
+        parts = [p.strip() for p in spec.split("|")]
+        if len(parts) != 4:
+            sys.exit(f"--repo 格式不对：{spec}（应为 仓库|说法|标签|负责会话）")
+        repo, said, label, owner = parts
+        repos.append(repo)
+        rows.append(f"| {said} | `{repo}` | {'—' if label in ('', '-') else f'`{label}`'} | {owner} |")
+    config = Path.home() / ".config/code-anywhere"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "issue-platform").write_text(args.platform + "\n")
+    for repo in dict.fromkeys(repos):
+        ensure_labels(args.platform, args.gitlab_host, repo)
+    text = (REPO / "provision/templates/issue-desk.CLAUDE.md").read_text()
+    values = {**commands(args.platform, args.gitlab_host), "HOME": str(Path.home()),
+              "REPO_TABLE": "\n".join(rows), "REPO_LIST": " ".join(dict.fromkeys(repos))}
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    desk = Path(args.workspace) / "issue-desk"
+    desk.mkdir(parents=True, exist_ok=True)
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        target = desk / name
+        if target.exists() and "issue 流程还没有配置" not in target.read_text() and target.read_text() != text:
+            shutil.copy2(target, target.with_name(f"{name}.bak-{int(time.time())}"))
+        target.write_text(text)
+    print(f"✓ issue 流程已配置：{args.platform}，{len(set(repos))} 个仓库；issue-desk 规则已写入 {desk}")
+    print("  下一步：在 issue-desk 的 Thread 里发 /clear，让它读新规则")
+
+
+if __name__ == "__main__":
+    main()

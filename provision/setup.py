@@ -294,7 +294,7 @@ def step_deps():
     if which("glab"):
         ok("glab")
     else:
-        warn("缺少 glab（GitLab issue 流程需要）")
+        info("没有 glab（只在 issue 流程用 GitLab 时需要，配置时会自动装）")
         if ask("现在下载 glab 到 ~/.local/bin？"):
             install_glab()
 
@@ -624,7 +624,7 @@ def step_browser():
 
 
 def step_rules():
-    """全局规则：跨 session 沟通格式、GitLab issue 处理（标记块管理）"""
+    """全局规则：跨 session 沟通格式、issue 处理（标记块管理）"""
     body = (TEMPLATES / "global-rules.md").read_text()
     targets = [HOME / ".claude" / "CLAUDE.md"]
     if which("codex") or (HOME / ".codex").exists():
@@ -644,49 +644,21 @@ def step_rules():
             ok(f"{path} 已更新")
 
 
-def step_gitlab():
-    """GitLab issue 流程（可选）：glab 登录 + issue-desk 会话目录"""
-    glab = which("glab")
-    if not glab:
-        info("跳过：没有 glab")
-        return
-    status = run([glab, "auth", "status"]).stdout or ""
-    hosts = [l.split("Logged in to ", 1)[1].split()[0] for l in status.splitlines() if "Logged in to " in l]
-    logged = bool(hosts)
-    if logged:
-        ok("glab 已登录：" + ", ".join(hosts))
+def step_issues():
+    """issue 流程（可选）：只检查。配置交给 code-anywhere 会话——在它的 Thread 里说“配置 issue 流程”"""
+    platform_file = HOME / ".config" / "code-anywhere" / "issue-platform"
+    if platform_file.exists():
+        platform = platform_file.read_text().strip()
+        cli = "gh" if platform == "github" else "glab"
+        if which(cli) and run([which(cli), "auth", "status"]).returncode == 0:
+            ok(f"issue 流程已配置：{platform}，{cli} 已登录")
+        else:
+            warn(f"issue 流程配置为 {platform}，但 {cli} 没装或没登录")
+            info("在 code-anywhere 的 Thread 里说“配置 issue 流程”，它会帮你装好并登录")
+    elif (HOME / ".config" / "gitlab-token").exists():
+        ok("issue 流程：GitLab（旧配置）")
     else:
-        warn("glab 未登录")
-        if ask("配置 GitLab issue 流程？", default=False):
-            host = prompt("GitLab 域名", "git.garena.com")
-            info(f"在 https://{host}/-/user_settings/personal_access_tokens 创建令牌，只勾 api")
-            token = prompt("粘贴令牌", secret=True)
-            token_file = HOME / ".config" / "gitlab-token"
-            token_file.parent.mkdir(parents=True, exist_ok=True)
-            token_file.write_text(token + "\n")
-            token_file.chmod(0o600)
-            result = run([glab, "auth", "login", "--hostname", host, "--stdin"], input_text=token)
-            if result.returncode:
-                warn("glab 登录失败：" + (result.stdout or "").strip()[-200:])
-                return
-            run([glab, "config", "set", "git_protocol", "ssh", "--host", host])
-            ok(f"glab 已登录 {host}，令牌存于 {token_file}")
-            logged = True
-    if not logged:
-        return
-    desk = HOME / "workspace" / "issue-desk"
-    if (desk / "CLAUDE.md").exists():
-        ok(f"issue-desk 已存在：{desk}")
-        return
-    warn("还没有 issue-desk 会话目录")
-    if ask(f"创建 {desk}（别名路由表在其 CLAUDE.md 里，可随时改）？"):
-        (desk / ".claude").mkdir(parents=True, exist_ok=True)
-        (desk / "CLAUDE.md").write_text(render("issue-desk.CLAUDE.md", HOME=str(HOME)))
-        (desk / ".claude" / "settings.local.json").write_text(
-            json.dumps({"model": "claude-sonnet-5", "effortLevel": "medium",  # 只判断仓库 + 整理 issue，Sonnet 足够
-                        "permissions": {"defaultMode": "bypassPermissions"}}, indent=2) + "\n")
-        ok(f"已创建 {desk}")
-        info("在该目录运行一次 `claude` 并说句话，桥接 5 分钟内会为它建 TG 话题")
+        info("issue 流程还没配置（可选）：装好后在 code-anywhere 的 Thread 里说“配置 issue 流程”")
 
 
 def step_service():
@@ -751,14 +723,14 @@ def step_verify():
     if env.get("BOT_TOKEN") and env.get("CHAT_ID") and ask("往 Telegram 发一条上线消息验证链路？"):
         tg(env["BOT_TOKEN"], "sendMessage", chat_id=env["CHAT_ID"],
            text=f"✅ code-anywhere 已在 {socket.gethostname()} 就绪。\n\n"
-                f"发 /new code-anywhere 打开它自己的 Thread，之后想加什么能力（远程查看浏览器、GitLab issue 流程……）直接在那里跟它说。\n"
+                f"私聊里会自动出现 code-anywhere（总体协调）和 issue-desk（反馈问题）两个 Thread。想加什么能力（比如配置 issue 流程），直接在 code-anywhere 里说。\n"
                 f"新项目：/new 项目名（默认 Claude，加 codex 用 Codex）。")
         ok("已发送，去 Telegram 看看")
 
 
 STEPS = {"deps": step_deps, "python": step_python, "tools": step_tools, "auth": step_cli_auth,
          "telegram": step_telegram, "hooks": step_hooks, "mcp": step_mcp, "browser": step_browser, "rules": step_rules,
-         "gitlab": step_gitlab, "service": step_service, "verify": step_verify}
+         "issues": step_issues, "service": step_service, "verify": step_verify}
 
 
 def main():

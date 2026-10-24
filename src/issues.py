@@ -20,8 +20,13 @@ TOKEN_FILE = Path.home() / ".config" / "gitlab-token"
 GITHUB_TOKEN_FILE = Path.home() / ".config" / "github-token"
 
 
+PLATFORM_FILE = Path.home() / ".config" / "code-anywhere" / "issue-platform"   # scripts/issue-desk-config 写入
+
+
 def platform() -> str:
     explicit = os.getenv("ISSUE_PLATFORM", "").lower()
+    if explicit not in ("github", "gitlab") and PLATFORM_FILE.exists():
+        explicit = PLATFORM_FILE.read_text().strip().lower()
     if explicit in ("github", "gitlab"):
         return explicit
     return "gitlab" if TOKEN_FILE.exists() else "github"
