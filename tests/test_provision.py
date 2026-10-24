@@ -53,6 +53,9 @@ class GroupMessageTests(unittest.TestCase):
         found = setup.find_group_message([{"update_id": 1, "message": {"chat": {"id": 9, "type": "private"},
                                                                        "from": {"id": 9, "username": "me"}}}])
         self.assertEqual((found["chat_id"], found["private"], found["is_forum"]), (9, True, True))
+        found = setup.find_group_message([{"update_id": 2, "message": {"chat": {"id": 9, "type": "private"},
+                                                                       "from": {"id": 9}, "message_thread_id": 77}}])
+        self.assertEqual(found["thread_id"], 77)   # 识别完删掉这个自动新建的临时 Thread
 
     def test_private_mode_requires_threaded_mode(self):
         from unittest.mock import patch

@@ -237,13 +237,13 @@ async def ensure_builtin_projects(bot, chat_id: int) -> None:
     ]
     for name, path, intro in builtins:
         path = Path(path).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        if name == "issue-desk" and not (path / "CLAUDE.md").exists():   # 先写角色说明，外脑骨架不会覆盖它
+            (path / "CLAUDE.md").write_text(ISSUE_DESK_PLACEHOLDER)
+            (path / "AGENTS.md").write_text(ISSUE_DESK_PLACEHOLDER)
+        recon.ensure_skeleton(str(path))   # 每台机器自己的外脑（仓库不再带开发机的 recon/）
         if projects.get_topic(str(path)):
             continue
-        if name == "issue-desk":
-            path.mkdir(parents=True, exist_ok=True)
-            if not (path / "CLAUDE.md").exists():
-                (path / "CLAUDE.md").write_text(ISSUE_DESK_PLACEHOLDER)
-                (path / "AGENTS.md").write_text(ISSUE_DESK_PLACEHOLDER)
         try:
             await create_project(bot, chat_id, name, path, engine, intro)
         except Exception:

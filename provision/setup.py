@@ -140,7 +140,8 @@ def find_group_message(updates: list[dict]) -> dict | None:
         private = chat["type"] == "private"
         return {"chat_id": chat["id"], "title": "私聊" if private else chat.get("title", ""),
                 "is_forum": private or bool(chat.get("is_forum")), "private": private,
-                "user_id": user.get("id"), "user": user.get("username") or user.get("first_name", "")}
+                "user_id": user.get("id"), "user": user.get("username") or user.get("first_name", ""),
+                "thread_id": message.get("message_thread_id") if private else None}
     return None
 
 
@@ -548,6 +549,9 @@ def step_telegram():
         warn("超时：没收到你的消息")
         return
     tg(token, "getUpdates", offset=offset)  # 确认已读，服务启动后不再重复处理
+    if found.get("thread_id"):   # 开了 Thread 模式的私聊里，在“全部”发消息会自动新建一个 Thread：识别完就删掉，免得留下空 Thread
+        with contextlib.suppress(TgError):
+            tg(token, "deleteForumTopic", chat_id=found["chat_id"], message_thread_id=found["thread_id"])
     ok(f"入口：{found['title']}（{found['chat_id']}），你的 TG 账号：{found['user']}（{found['user_id']}）")
     while missing := check_group(token, found["chat_id"], me["id"]):
         warn("；".join(missing))
