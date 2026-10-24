@@ -52,6 +52,8 @@ IS_MAC = sys.platform == "darwin"
 # macOS 没有 Xvfb：槽位直接在桌面上开有界面的 Chrome，远程查看转发系统自带的“屏幕共享”（整个桌面，
 # 连接时输入 Mac 登录密码）。用的时候才开隧道、用完就关（2026-10-24 用户确认可接受）
 MAC_SCREEN_SHARING_PORT = 5900
+# Retina 屏原样推过去画面太大（3360×2100），远程查看期间临时切到不缩放的低分辨率，结束后恢复（需 displayplacer）
+MAC_VIEW_RES = os.getenv("BROWSER_MAC_VIEW_RES", "1440x900")
 
 _leases: dict[int, dict] = {}        # 槽位 → {client, session_id, cwd, since, conns, release_task}
 _last_used: dict[int, float] = {}
@@ -681,12 +683,40 @@ async def _public_tunnel(item: dict, port: int) -> str:
     raise RuntimeError("免费公共隧道都没连通（" + "；".join(errors) + "）。可以在 code-anywhere 里说“用自己的隧道做远程查看”")
 
 
+def _displayplacer() -> str | None:
+    return _which("displayplacer", Path.home() / ".local/bin/displayplacer")
+
+
+async def _mac_lower_resolution() -> str | None:
+    """切到 MAC_VIEW_RES（不缩放），返回恢复用的原配置；没有工具或已是目标分辨率返回 None。"""
+    tool = _displayplacer()
+    if not tool or not MAC_VIEW_RES:
+        return None
+    import re
+    code, out = await _run(tool, "list")
+    restore = re.findall(r'^displayplacer "(.+)"$', out, re.M)
+    main = re.search(r"Persistent screen id: (\S+)", out)
+    if code or not restore or not main:
+        return None
+    if f"res:{MAC_VIEW_RES}" in restore[-1] and "scaling:on" not in restore[-1]:
+        return None
+    await _run(tool, f"id:{main.group(1)} res:{MAC_VIEW_RES} scaling:off origin:(0,0) degree:0")
+    return restore[-1]
+
+
+async def _mac_restore_resolution(config: str) -> None:
+    tool = _displayplacer()
+    if tool and config:
+        await _run(tool, *[f"{part}" for part in config.split('" "')])
+
+
 async def _open_view(item: dict, slot: int) -> str:
     """起 VNC 并把它送到手机能打开的地址，返回 noVNC 网页地址（不含参数）。进程记在 item["procs"]。"""
     mode = view_mode()
     if IS_MAC:   # 系统屏幕共享已经在 5900 上，不需要另起 VNC；一次性密码换成 Mac 登录密码
         target = MAC_SCREEN_SHARING_PORT
         vnc = None
+        item["display_restore"] = await _mac_lower_resolution()
     else:
         target = vnc_port(slot)
         vnc = await asyncio.create_subprocess_exec(
@@ -817,6 +847,11 @@ async def finish_help(help_id: str, status: str, notify: bool = True) -> None:
     for proc in item.pop("procs", []):
         if proc.returncode is None:
             proc.terminate()
+    if item.get("display_restore"):
+        try:
+            await _mac_restore_resolution(item.pop("display_restore"))
+        except Exception:
+            log.warning("[browser] 恢复屏幕分辨率失败", exc_info=True)
     if item.pop("relay", None):
         try:
             await _relay("stop")

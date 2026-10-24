@@ -133,6 +133,19 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tried, ["cloudflared", "ssh"])
         self.assertEqual(item["tunnel"], "localhost.run")
 
+    async def test_mac_view_lowers_and_restores_resolution(self):
+        listing = ('Persistent screen id: AAA\n  mode 6: res:1680x1050 scaling:on <-- current mode\n'
+                   'displayplacer "id:AAA res:1680x1050 color_depth:4 enabled:true scaling:on origin:(0,0) degree:0"\n')
+        calls = []
+        async def fake_run(*args, timeout=20):
+            calls.append(args)
+            return 0, listing
+        with patch.object(pool, "_displayplacer", return_value="dp"), patch.object(pool, "_run", fake_run):
+            saved = await pool._mac_lower_resolution()
+            await pool._mac_restore_resolution(saved)
+        self.assertEqual(calls[1], ("dp", "id:AAA res:1440x900 scaling:off origin:(0,0) degree:0"))
+        self.assertEqual(calls[2], ("dp", "id:AAA res:1680x1050 color_depth:4 enabled:true scaling:on origin:(0,0) degree:0"))
+
     def test_relay_script_saves_and_restores_existing_service(self):
         with patch.object(pool, "RELAY_LISTEN", "10.0.1.188:6801"), patch.object(pool, "RELAY_WEBSOCKIFY", "ws/run --ssl-only"), \
              patch.object(pool, "RELAY_RESTORE", "ws/run --ssl-only 10.0.1.188:6801 10.0.1.188:5900"):

@@ -574,6 +574,18 @@ def step_remote_view():
             run([str(pip) if pip.exists() else which("uv") or "pip", *([] if pip.exists() else ["pip"]),
                  "install", *(["--python", str(REPO / ".venv" / "bin" / "python")] if not pip.exists() else []),
                  "websockify"], capture=False)
+    if IS_MAC:  # Retina 屏远程查看时临时降分辨率用
+        if shutil.which("displayplacer") or (BIN / "displayplacer").exists():
+            ok("displayplacer（远程查看时临时降分辨率）")
+        else:
+            warn("缺少 displayplacer（远程查看时画面会很大）")
+            arch = "apple" if os.uname().machine == "arm64" else "intel"
+            if ask(f"下载 displayplacer 到 {BIN}？"):
+                BIN.mkdir(parents=True, exist_ok=True)
+                run(["curl", "-fsSL", "-o", str(BIN / "displayplacer"),
+                     f"https://github.com/jakehilborn/displayplacer/releases/download/v1.4.0/displayplacer-{arch}-v140"],
+                    capture=False)
+                (BIN / "displayplacer").chmod(0o755)
     if (NOVNC_DIR / "vnc.html").exists() or Path("/usr/share/novnc/vnc.html").exists():
         ok("noVNC 网页")
     else:
