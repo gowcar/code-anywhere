@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from src import agent_sessions as service, session_mcp as mcp
+from src import agent_sessions as service, procinfo, session_mcp as mcp
 from src.renderer import split_user_message
 
 
@@ -25,13 +25,25 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             mcp.source_session([self.source], [('123', '999')])
 
-    def test_parent_walk(self):
+    def test_parent_walk_linux(self):
         def stat(path):
             pid = int(path.parent.name)
             name, parent = ('codex', 1) if pid == 123 else ('python', 123)
             return f'{pid} ({name}) S {parent} ' + '0 ' * 17 + '456'
-        with patch.object(mcp.os, 'getppid', return_value=124), patch.object(Path, 'read_text', stat):
+        with patch.object(mcp.os, 'getppid', return_value=124), patch.object(procinfo, '_LINUX', True), \
+             patch.object(Path, 'read_text', stat):
             self.assertEqual(mcp.caller_processes(), [('123', '456')])
+
+    def test_parent_walk_macos(self):
+        # macOS 没有 /proc：同样的父进程链改由 ps 取得，启动标记为启动时刻
+        table = {124: dict(comm='/usr/bin/python3', ppid='123', lstart='Sat Oct 25 16:15:50 2026'),
+                 123: dict(comm='/Users/x/.local/bin/claude', ppid='1', lstart='Fri Oct 24 23:05:07 2026')}
+        with patch.object(mcp.os, 'getppid', return_value=124), patch.object(procinfo, '_LINUX', False), \
+             patch.object(procinfo, '_ps', lambda pid, field: table[int(pid)][field]):
+            found = mcp.caller_processes()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][0], '123')
+        self.assertTrue(found[0][1].isdigit())  # 进会话 ID（以冒号分段），不能带冒号
 
     async def test_mcp_ignores_supplied_label(self):
         call = AsyncMock(side_effect=[{'sessions': [self.source]}, {'status': 'not_sent'}])

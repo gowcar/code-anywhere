@@ -11,7 +11,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from src import backends
+from src import backends, procinfo
 from src.config import PROJECT_ROOT
 
 RECEIPTS = PROJECT_ROOT / '.agent-message-receipts.sqlite3'
@@ -91,14 +91,14 @@ async def _transcript(pane, cwd, backend, pid):
     if tagged and Path(tagged['transcript_path']).exists():
         return tagged['session_id'], tagged['transcript_path']
     try:
-        args = Path(f'/proc/{pid}/cmdline').read_bytes().decode().split('\0')
+        args = procinfo.args(pid)
         sid = next((args[i + 1] for i, arg in enumerate(args[:-1])
                     if arg in {'--resume', '-r', '--session-id'}
                     and re.fullmatch(r'[a-f0-9-]{36}', args[i + 1])), None)
         if sid:
             for path in (Path.home() / '.claude/projects').glob(f'*/{sid}.jsonl'):
                 return sid, str(path)
-        out = await backends.command('lsof', '-a', '-p', pid, '-Fn')
+        out = await backends.command(procinfo.LSOF, '-a', '-p', pid, '-Fn')
         for line in out.splitlines():
             if line.startswith('n') and line.endswith('.jsonl') and '/.claude/projects/' in line:
                 path = Path(line[1:])
@@ -122,12 +122,10 @@ async def discover():
             if len(pids) != 1:
                 continue  # do not guess which of several processes owns input
             pid = pids[0]
-            try:
-                # Linux process start ticks prevent recycled PIDs matching old IDs.
-                stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-                start = stat[19]
-                actual_cwd = str(Path(f'/proc/{pid}/cwd').resolve(strict=True))
-            except OSError:
+            # 启动标记防止回收的 PID 对上旧会话 ID；Linux / macOS 取法不同，见 procinfo
+            start = procinfo.start_token(pid)
+            actual_cwd = procinfo.cwd(pid)
+            if not start or not actual_cwd:
                 continue
             found = await _transcript(pane, actual_cwd, backend, pid)
             path = found[1] if found else None
