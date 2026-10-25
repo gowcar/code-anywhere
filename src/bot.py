@@ -6,6 +6,7 @@ import html as html_lib
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -872,6 +873,12 @@ def _trust_prompt_state(screen: str) -> tuple[bool, bool]:
     return True, any(choice in line for line in selected for choice in _TRUST_CHOICES)
 
 
+def menu_open(screen: str) -> bool:
+    """Claude 的选择题（AskUserQuestion）正在屏上：底部提示同时有 Enter to select 和 Esc to cancel。"""
+    tail = "\n".join(screen.splitlines()[-12:])
+    return "Enter to select" in tail and "Esc to cancel" in tail
+
+
 async def _capture_pane(pane_id: str) -> str:
     try:
         return await backends.command("tmux", "capture-pane", "-p", "-t", pane_id)
@@ -1662,6 +1669,23 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
         await _sync_claude_session(target_pane, cwd)
         if not any(v.get("tmux_pane") == target_pane for v in terminal_sessions.values()):
             claude_start_offsets = backends.claude_transcript_offsets(cwd)
+
+    # 终端停在选择题上：直接打字 + 回车会被当成选项，话也进不了会话（2026-10-25 flower-ios 连发三条都被吞）。
+    # 纯数字 = 选这一项；其他文字 = 先取消这道题（等同 “Chat about this”），再把话交给会话。
+    if menu_open(await _capture_pane(target_pane)):
+        if re.fullmatch(r"\s*[1-9]\s*", text):
+            n = int(text)
+            for _ in range(n - 1):  # 与 TG 按钮同一套按键：每页光标从第 1 项开始，Down×(n-1)+Enter
+                await backends.command("tmux", "send-keys", "-t", target_pane, "Down")
+            await backends.command("tmux", "send-keys", "-t", target_pane, "Enter")
+            await message.reply_text(f"已在终端选择第 {n} 项。")
+            return
+        await backends.command("tmux", "send-keys", "-t", target_pane, "Escape")
+        await asyncio.sleep(1.0)
+        if menu_open(await _capture_pane(target_pane)):
+            await message.reply_text("⚠️ 终端停在选择题上，取消失败，这条消息没有发出。请 /screen 看看终端。")
+            return
+        await message.reply_text("终端在等你回答选择题：已取消这道题，把你的话直接交给会话。")
 
     # 标记：来源=TG（watcher 跳过 user event ephemeral 避免重复）+ 本轮首条 assistant text 应 quote-reply 到这条用户消息
     if not is_private and topic_id:

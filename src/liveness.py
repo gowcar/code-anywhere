@@ -425,6 +425,8 @@ class Monitor:
 
     async def on_change(self, topic: Topic, previous: str, now: float):
         log.info("[liveness] topic=%s %s → %s", topic.topic_id, previous, topic.state)
+        if topic.state == "waiting":
+            asyncio.create_task(self.offer_screen_menu(topic.topic_id))
         if topic.state == "stalled" and not topic.alert_id:
             await self.send_alert(topic, now)
         if previous == "stalled" and topic.state != "stalled" and topic.alert_id:
@@ -477,6 +479,27 @@ class Monitor:
             topic.card_activity = _activity.get(topic.topic_id, 0)
             _save_cards()
         topic.card_updated = now
+
+    async def offer_screen_menu(self, topic_id: int, delay: float = 4.0):
+        """选择题没变成 TG 按钮时，把屏上的题目和选项发过去。
+
+        按钮靠会话日志里的 AskUserQuestion 生成；Claude 有时要等整条回复结束才把它写进日志，
+        这期间 TG 只看得到“等你回答”，看不到题（2026-10-25 flower-ios）。
+        """
+        await asyncio.sleep(delay)  # 给日志里的题转成按钮留点时间，免得重复发
+        from src import api_server, bot as bot_module
+        if any(m.get("topic_id") == topic_id for m in api_server._pending_menus.values()):
+            return
+        pane = next((v.get("tmux_pane") for v in api_server.terminal_sessions.values()
+                     if v.get("topic_id") == topic_id and v.get("tmux_pane")), None)
+        if not pane:
+            return
+        screen = await bot_module._capture_pane(pane)
+        if not bot_module.menu_open(screen):
+            return
+        await self._send(topic_id, "🟡 终端在等你回答选择题：\n" + screen_excerpt(screen, 24)
+                         + "\n回复数字选择当前这一问的对应项；发其他文字会取消这道题，把你的话直接交给会话。",
+                         silent=False)
 
     async def send_alert(self, topic: Topic, now: float):
         snap = topic.snapshot

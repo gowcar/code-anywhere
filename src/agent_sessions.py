@@ -61,9 +61,23 @@ def tail_events(path, offset=None, limit=262144):
         return []
 
 
+_ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+# 输入框里的灰色文字（ESC[2m）是 Claude 的输入建议 / Codex 的占位提示，不是用户草稿
+_DIM_TEXT = re.compile(r'\x1b\[2m[^\x1b]*')
+
+
+def _prompt_is_empty(raw_line):
+    text = _ANSI.sub('', _DIM_TEXT.sub('', raw_line))
+    return re.match(r'^\s*[›❯]\s*(Ask Codex to do anything)?\s*$', text)
+
+
 def screen_state(screen):
-    """Best-effort UI evidence; absence of a spinner does not mean idle."""
-    lines = screen.splitlines()[-35:]
+    """Best-effort UI evidence; absence of a spinner does not mean idle.
+
+    screen 可以带颜色（capture-pane -e）：靠它区分输入框里的灰色建议和用户真正打的草稿。
+    """
+    raw_lines = screen.splitlines()[-35:]
+    lines = [_ANSI.sub('', line) for line in raw_lines]
     for line in reversed(lines):
         if re.search(r'esc to interrupt|ctrl\+c to interrupt', line, re.I):
             return 'running', 'terminal shows interruptible work'
@@ -76,7 +90,7 @@ def screen_state(screen):
     tail = '\n'.join(lines)
     if claude_running(tail) or codex_running(tail):
         return 'running', 'terminal shows a working spinner'
-    if any(re.match(r'^\s*[›❯]\s*(Ask Codex to do anything)?\s*$', line) for line in lines):
+    if any(_prompt_is_empty(line) for line in raw_lines):
         return 'waiting_input', 'terminal shows an empty input prompt (heuristic)'
     return 'unknown', 'no reliable status indicator visible'
 
@@ -129,7 +143,7 @@ async def discover():
                 continue
             found = await _transcript(pane, actual_cwd, backend, pid)
             path = found[1] if found else None
-            screen = await backends.command('tmux', 'capture-pane', '-p', '-t', pane)
+            screen = await backends.command('tmux', 'capture-pane', '-e', '-p', '-t', pane)
             status, evidence = screen_state(screen)
             events = tail_events(path)
             summary, summary_role, model = '', None, ''
