@@ -18,7 +18,9 @@ _MONO = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/System/Library
 _MONO_BOLD = ["/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", "/System/Library/Fonts/Menlo.ttc"]
 _CJK = [str(Path.home() / ".local/share/fonts/NotoSansCJK-Regular.ttc"),
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/PingFang.ttc"]
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/PingFang.ttc",
+        # macOS 13 起苹方挪进 AssetsV2（路径随机器而变），系统目录里固定存在的是冬青黑体 / 华文黑体
+        "/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/STHeiti Light.ttc"]
 _BASIC = [(0, 0, 0), (205, 49, 49), (13, 188, 121), (229, 229, 16), (36, 114, 200), (188, 63, 188),
           (17, 168, 205), (229, 229, 229), (102, 102, 102), (241, 76, 76), (35, 209, 139), (245, 245, 67),
           (59, 142, 234), (214, 112, 214), (41, 184, 219), (255, 255, 255)]
@@ -26,7 +28,8 @@ _BASIC = [(0, 0, 0), (205, 49, 49), (13, 188, 121), (229, 229, 16), (36, 114, 20
 _SUBSTITUTE = str.maketrans({"⎿": "└", "⏵": "▸", "⏸": "‖", "⏺": "●", "✻": "✱", "✢": "✱", "✶": "✱", "✽": "✱",
                              "⧉": "□", "↯": "↓"})
 _SGR = re.compile(r"\x1b\[([0-9;]*)m")
-_OTHER_ESC = re.compile(r"\x1b\[[0-9;?]*[A-Za-ln-z]|\x1b\][^\x07]*\x07")
+# OSC 有两种结尾：BEL，或 ST（ESC \）——Claude Code 的超链接（OSC 8）用的是后者
+_OTHER_ESC = re.compile(r"\x1b\[[0-9;?]*[A-Za-ln-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 @lru_cache
