@@ -68,7 +68,9 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         pool._leases[1] = {"client": "5-5", "session_id": "claude:%9:5:5", "cwd": "/w", "conns": 1}
         bot = AsyncMock()
         bot.send_message.return_value.message_id = 1
-        with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_LISTEN", "0.0.0.0:6801"), \
+        # 验的是 Linux 的 x11vnc 流程；macOS 改用系统屏幕共享，另有分支
+        with patch.object(pool, "IS_MAC", False), patch.object(pool, "RELAY_HOST", ""), \
+             patch.object(pool, "RELAY_LISTEN", "0.0.0.0:6801"), \
              patch.object(pool, "RELAY_PUBLIC_URL", "https://me.example:6801"), \
              patch.object(pool, "RELAY_WEBSOCKIFY", "websockify --web /usr/share/novnc"), \
              patch.object(pool.asyncio, "create_subprocess_exec", fake_exec), patch.object(pool.asyncio, "sleep", AsyncMock()), \
