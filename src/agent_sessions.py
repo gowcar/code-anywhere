@@ -326,7 +326,7 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                 result.update(status='not_sent', detail=(
                     f"target is {session['status']} (only idle or working sessions accept urgent messages)" if urgent else
                     'target is not confirmed idle; inspect status and retry with a new request_id later'))
-            elif not session['_transcript']:
+            elif not session['_transcript'] and session.get('backend') != 'codex':
                 result.update(status='not_sent', detail='cannot locate transcript to confirm delivery')
             else:
                 from src.bot import _inject_tmux, _project_locks
@@ -339,7 +339,13 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                         result.update(status='not_sent', detail='target changed or is no longer idle')
                     else:
                         path = current['_transcript']
-                        offset = Path(path).stat().st_size
+                        # A fresh Codex thread created by /new has no rollout until its
+                        # first user input.  It is still a valid, idle terminal target:
+                        # snapshot all existing logs, inject once, then bind only the
+                        # rollout that the live process opens for this message.
+                        fresh_codex = current.get('backend') == 'codex' and not path
+                        start_offsets = backends.codex_transcript_offsets() if fresh_codex else None
+                        offset = Path(path).stat().st_size if path else 0
                         marker = f"[{'Urgent agent' if urgent else 'Agent'} message {request_id} from {sender}]"
                         result['sent_at'] = time.time()
                         result.update(_transcript=path, _offset=offset, _marker=marker)
@@ -354,7 +360,25 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                         if urgent and current['status'] == 'running':
                             result.update(detail='written while target was working; it is inserted at the '
                                                  'next tool call — check get_session_feedback with this request_id')
-                        for _ in range(20):
+                        for _ in range(40 if fresh_codex else 20):
+                            if fresh_codex and not path:
+                                found = await backends.codex_transcript(current['tmux_pane'], current['cwd'])
+                                if found:
+                                    _, path = found
+                                    offset = start_offsets.get(str(Path(path).resolve()), 0)
+                                    result.update(_transcript=path, _offset=offset)
+                                    db = receipt_db()
+                                    try:
+                                        db.execute('UPDATE receipts SET result=? WHERE request_id=?',
+                                                   (json.dumps(result), request_id))
+                                        db.commit()
+                                    finally:
+                                        db.close()
+                                    # Replace the stale pre-/new watcher as soon as the
+                                    # first-turn rollout exists, so public replies are not lost.
+                                    from src.api_server import register_pane_watcher
+                                    await register_pane_watcher(current['tmux_pane'], current['cwd'],
+                                                                start_offsets=start_offsets)
                             if receipt_seen(path, offset, marker):
                                 result.update(status='received', detail='native user-message receipt observed; not a task completion')
                                 break

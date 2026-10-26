@@ -100,6 +100,34 @@ class SessionToolsTests(unittest.IsolatedAsyncioTestCase):
             await service.send_message(self.session['session_id'], 'hello', 'unconfirmed-1')
             write.assert_awaited_once()
 
+    async def test_fresh_codex_without_rollout_accepts_first_message_and_binds_new_log(self):
+        self.session.update(backend='codex', _transcript=None)
+
+        async def inject(pane, text):
+            self.path.write_text(json.dumps({'type': 'response_item', 'payload': {
+                'type': 'message', 'role': 'user',
+                'content': [{'type': 'input_text', 'text': text}]}}) + '\n')
+
+        with patch.object(service, 'discover', AsyncMock(return_value=[self.session])), \
+             patch.object(service.backends, 'codex_transcript_offsets', return_value={str(self.path.resolve()): 0}), \
+             patch.object(service.backends, 'codex_transcript', AsyncMock(return_value=('native-new', str(self.path)))), \
+             patch('src.api_server.register_pane_watcher', AsyncMock(return_value=True)) as register, \
+             patch('src.bot._inject_tmux', AsyncMock(side_effect=inject)) as write:
+            result = await service.send_message(self.session['session_id'], 'first', 'fresh-codex-1')
+
+        self.assertEqual(result['status'], 'received')
+        write.assert_awaited_once()
+        register.assert_awaited_once_with('%99', self.tmp.name,
+                                          start_offsets={str(self.path.resolve()): 0})
+
+    async def test_missing_transcript_still_refuses_non_codex_target(self):
+        self.session.update(backend='claude', _transcript=None)
+        with patch.object(service, 'discover', AsyncMock(return_value=[self.session])), \
+             patch('src.bot._inject_tmux', AsyncMock()) as write:
+            result = await service.send_message(self.session['session_id'], 'hello', 'fresh-claude-1')
+        self.assertEqual(result['status'], 'not_sent')
+        write.assert_not_awaited()
+
     async def test_replaced_target_not_sent(self):
         with patch.object(service, 'discover', AsyncMock(side_effect=[[self.session], []])), \
              patch('src.bot._inject_tmux', AsyncMock()) as write:
