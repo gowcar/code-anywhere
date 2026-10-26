@@ -28,7 +28,7 @@ class ReconRootTests(unittest.TestCase):
         context = recon.build_session_context(str(self.child))
 
         self.assertFalse(created)
-        self.assertEqual(recon.resolve_project_root(str(self.child)), self.root)
+        self.assertEqual(recon.resolve_project_root(str(self.child)), self.root.resolve())
         self.assertFalse((self.child / "recon").exists())
         self.assertFalse((self.child / "CLAUDE.md").exists())
         self.assertTrue((self.root / "CLAUDE.md").exists())
