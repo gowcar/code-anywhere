@@ -767,6 +767,8 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 if c.get("type") != "tool_result":
                                     continue
                                 tool_use_id = c.get("tool_use_id", "")
+                                if tool_use_id:
+                                    await liveness.on_tool_finished(topic_id, tool_use_id)
                                 if not tool_use_id or tool_use_id in sent_image_tool_ids:
                                     continue
                                 inner = c.get("content")
@@ -917,6 +919,10 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 tname = block.get("name", "?")
                                 tinput = block.get("input", {}) or {}
                                 tid = block.get("id", "")
+                                # Codex 公共日志只在 CommandExecution 完成后才写 item_completed；
+                                # 这不是“工具开始”，不能把已结束的命令显示成仍在运行。
+                                if block.get("completed"):
+                                    continue
                                 # AskUserQuestion → 转 TG inline keyboard（阶段1: 单问单选）
                                 if tname == "AskUserQuestion":
                                     try:
@@ -936,7 +942,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                         tool_use_image_paths[tid] = abs_p
                                 desc = format_tool_use(tname, tinput)
                                 from src.renderer import tool_card_line
-                                if not await liveness.on_tool(topic_id, tool_card_line(tname, tinput)):  # 进状态卡
+                                if not await liveness.on_tool(topic_id, tool_card_line(tname, tinput), tid):  # 进状态卡
                                     await send_ephemeral(
                                         _bot, chat_id,
                                         desc,

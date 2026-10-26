@@ -330,6 +330,7 @@ messages. Current CLI uses item_completed; older rollouts use agent_message.
         cmd = item.get("command", [])
         return {"type": "assistant", "uuid": uid, "message": {"content": [
             {"type": "tool_use", "id": uid, "name": "Bash",
+             "completed": True,
              "input": {"command": " ".join(cmd) if isinstance(cmd, list) else cmd}}]}}
     else:
         return None

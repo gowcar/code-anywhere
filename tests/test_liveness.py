@@ -47,6 +47,8 @@ class MonitorTests(unittest.TestCase):
                   patch.dict(liveness._topics, {}, clear=True),
                   patch.dict(liveness._activity, {}, clear=True),
                   patch.dict(liveness._last_tool, {}, clear=True),
+                  patch.dict(liveness._active_tools, {}, clear=True),
+                  patch.dict(liveness._tool_count, {}, clear=True),
                   patch.object(liveness, "_monitor", None),
                   patch.dict(liveness._user_msgs, {}, clear=True),
                   patch("src.projects.get_path", return_value="/w/demo")):
@@ -95,6 +97,36 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(text.splitlines()), 2)
         self.assertIn("⚡ <code>step 5</code> · 第6步", text)
         self.assertNotIn("step 4", text)
+
+    def test_codex_terminal_count_and_idle_copy_are_distinct(self):
+        screen = "◦ Working (16s • esc to interrupt) · 1 background terminal running\n› Ask Codex"
+        snap = liveness.parse_screen(screen, "codex")
+        self.assertEqual(snap.terminal_active, 1)
+        topic = liveness.Topic(7, state="running", turn_started=1000.0, snapshot=snap)
+        self.assertIn("⚡ 1 个终端命令执行中", liveness.card_text(topic, 1016.0))
+        topic.snapshot = liveness.Snapshot(state="running")
+        self.assertIn("💤 当前空闲 · 无活动", liveness.card_text(topic, 1017.0))
+
+    def test_finished_tool_is_replaced_by_idle_activity_and_parallel_tool_survives(self):
+        async def scenario():
+            topic = liveness._topics.setdefault(7, liveness.Topic(7, state="running", turn_started=1000.0))
+            topic.card_id = 55
+            with patch.object(liveness.time, "time", return_value=1000.0):
+                liveness.note_tool(7, "⚡ <code>first</code>", "tool-1")
+            with patch.object(liveness.time, "time", return_value=1001.0):
+                liveness.note_tool(7, "⚡ <code>second</code>", "tool-2")
+            with patch.object(liveness.time, "time", return_value=1002.0):
+                await liveness.on_tool_finished(7, "tool-2")
+            after_second = self.bot.edited[-1]["text"]
+            with patch.object(liveness.time, "time", return_value=1003.0):
+                await liveness.on_tool_finished(7, "tool-1")
+            return after_second, self.bot.edited[-1]["text"]
+
+        after_second, after_all = asyncio.run(scenario())
+        self.assertIn("first", after_second)                       # 并行的第一条仍在执行
+        self.assertNotIn("second", after_second)
+        self.assertIn("💤 当前空闲 · 无活动", after_all)
+        self.assertNotIn("first", after_all)                       # 不再残留已完成命令
 
     def test_tool_card_line_is_short_and_meaningful(self):
         from src.renderer import tool_card_line
@@ -194,6 +226,7 @@ class PrivateModeTests(unittest.TestCase):
         bot = FakeBot()
         async def scenario():
             with patch.dict(liveness._topics, {}, clear=True), patch.dict(liveness._last_tool, {}, clear=True), \
+                 patch.dict(liveness._active_tools, {}, clear=True), patch.dict(liveness._tool_count, {}, clear=True), \
                  patch.dict(liveness._activity, {}, clear=True), patch.object(liveness, "_monitor", None), \
                  patch.object(liveness, "CARDS_FILE", Path(tempfile.mkdtemp()) / "cards.json"), \
                  patch.object(liveness, "PRIVATE_MOVE_EVERY", 0.01):
@@ -295,8 +328,8 @@ class TextTests(unittest.TestCase):
 
     def test_tool_note_keeps_rendered_html_single_line(self):
         # 卡片以 HTML 发送，命令要留在 <code> 里（否则路径会被识别成 bot 命令）；只去掉换行
-        with patch.dict(liveness._last_tool, {}, clear=True):
-            liveness.note_tool(3, "⚡ <code>git status &amp;&amp;\nls</code>")
+        with patch.dict(liveness._last_tool, {}, clear=True), patch.dict(liveness._active_tools, {}, clear=True):
+            liveness.note_tool(3, "⚡ <code>git status &amp;&amp;\nls</code>", "tool-1")
             self.assertEqual(liveness._last_tool[3][-1][0], "⚡ <code>git status &amp;&amp; ls</code>")
 
 

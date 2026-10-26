@@ -187,6 +187,13 @@ class PreferencesTests(unittest.TestCase):
         legacy = {'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'old'}}
         self.assertEqual(backends.normalize_codex(legacy)['message']['content'][0]['text'], 'old')
 
+    def test_completed_codex_command_is_not_reported_as_active(self):
+        event = {'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {
+            'type': 'CommandExecution', 'id': 'exec-1', 'command': ['/bin/bash', '-lc', 'sed -n 1p file']}}}
+        block = backends.normalize_codex(event)['message']['content'][0]
+        self.assertTrue(block['completed'])
+        self.assertEqual(block['id'], 'exec-1')
+
     def test_internal_and_duplicate_records_are_not_published(self):
         for ev in [item('Reasoning', 'private'), item('DeveloperMessage', 'private'),
                    {'type': 'world_state', 'payload': {'state': 'private'}},

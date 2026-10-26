@@ -51,12 +51,14 @@ class Snapshot:
     detail: str = ""             # retrying 等状态的原因
     fingerprint: str = ""        # 去掉计时/状态栏后的屏幕摘要，用于判断进展
     total_out: int = 0           # Codex：会话累计输出 token（屏幕上没有，取自会话日志），用来算本轮用量
+    terminal_active: int = 0     # Codex 屏幕明确报告的后台终端命令数
 
 
 _CLAUDE_SPINNER = re.compile(r"^\s*\S\s+(\S+…)\s*\(([^)]*)\)", re.MULTILINE)
 _CLAUDE_CONTEXT = re.compile(r"(\d+)% \(\d+K/\d+K\)")
 _CODEX_WORKING = re.compile(r"Working \(([^•)]+?)\s*•")
 _CODEX_CONTEXT = re.compile(r"(\d+)% context left")
+_CODEX_TERMINALS = re.compile(r"(\d+) background terminals? running")
 _TOKENS = re.compile(r"([↓↑])\s*([\d.]+k?)\s*tokens")
 _RETRY = re.compile(r"(?:Retrying in \d+\s*\w*.*?|Reconnecting.*?|retrying.*?attempt \d+.*?)$", re.IGNORECASE | re.MULTILINE)
 _WAITING = ("Do you want to proceed", "Do you want to make this edit", "Enter to select", "Esc to cancel")
@@ -88,6 +90,8 @@ def parse_screen(screen: str, backend: str) -> Snapshot:
             snap.elapsed = m.group(1).strip()
         if m := _CODEX_CONTEXT.search(screen):
             snap.context = f"剩余 {m.group(1)}%"
+        if m := _CODEX_TERMINALS.search(screen):
+            snap.terminal_active = int(m.group(1))
     else:
         if m := _CLAUDE_SPINNER.search(screen):
             snap.state = snap.state if snap.state == "retrying" else "running"
@@ -177,6 +181,7 @@ class Topic:
 _topics: dict[int, Topic] = {}
 _activity: dict[int, int] = {}          # 话题里“正式消息”计数：卡片之后出现新消息就挪到底部
 _last_tool: dict[int, deque] = {}       # 每个话题最近几条工具动作 (描述, 时间)
+_active_tools: dict[int, dict[str, tuple[str, float, int]]] = {}  # tool_use_id → (描述, 开始时间, 本轮步数)
 _tool_count: dict[int, int] = {}         # 这一轮第几步
 _monitor: "Monitor | None" = None
 _names: dict[str, dict] | None = None
@@ -213,19 +218,37 @@ def note_activity(topic_id: int) -> None:
         asyncio.get_event_loop().create_task(_monitor.bump(topic_id))
 
 
-def note_tool(topic_id: int, description: str) -> None:
+def note_tool(topic_id: int, description: str, tool_id: str) -> None:
     """description 是渲染好的一行 HTML（renderer.tool_card_line），卡片里原样显示最新一条。"""
-    _last_tool.setdefault(topic_id, deque(maxlen=TOOL_LINES)).append((description.replace("\n", " ").strip(), time.time()))
-    _tool_count[topic_id] = _tool_count.get(topic_id, 0) + 1
+    description = description.replace("\n", " ").strip()
+    started = time.time()
+    step = _tool_count.get(topic_id, 0) + 1
+    _last_tool.setdefault(topic_id, deque(maxlen=TOOL_LINES)).append((description, started))
+    _active_tools.setdefault(topic_id, {})[tool_id] = (description, started, step)
+    _tool_count[topic_id] = step
 
 
-async def on_tool(topic_id: int, description: str) -> bool:
+async def on_tool(topic_id: int, description: str, tool_id: str = "") -> bool:
     """工具动作进状态卡滚动显示，替代一条条单独发、几秒后删的消息。返回 False 时调用方照旧单独发。"""
-    note_tool(topic_id, description)
+    # 正常 watcher 都会给 tool_use_id；保留无 id 兼容旧调用与测试，但每次也要是独立条目。
+    tool_id = tool_id or f"legacy:{_tool_count.get(topic_id, 0) + 1}"
+    note_tool(topic_id, description, tool_id)
     if _monitor is None:
         return False
     await _monitor.tool_event(topic_id)
     return True
+
+
+async def on_tool_finished(topic_id: int, tool_id: str) -> None:
+    """收到 tool_result：只清对应工具；并行工具仍保留，全部结束后卡片立即显示无活动。"""
+    active = _active_tools.get(topic_id)
+    if not active or tool_id not in active:
+        return
+    active.pop(tool_id, None)
+    if not active:
+        _active_tools.pop(topic_id, None)
+    if _monitor is not None:
+        await _monitor.tool_finished_event(topic_id)
 
 
 def _load_names() -> dict:
@@ -282,10 +305,14 @@ def card_text(topic: Topic, now: float, live: bool = False) -> str:
     if topic.state in ("retrying", "stalled"):
         quiet = human_elapsed(now - topic.last_progress)
         lines.append(html.escape(f"{quiet}无进展" + (f"：{snap.detail}" if snap.detail else "")))
-    if tools := _last_tool.get(topic.topic_id):
-        desc, at = tools[-1]
-        step = _tool_count.get(topic.topic_id, len(tools))
+    active = _active_tools.get(topic.topic_id)
+    if active:
+        desc, at, step = next(reversed(active.values()))
         lines.append(f"{desc} · 第{step}步 · {human_elapsed(now - at)}前")
+    elif snap.terminal_active:
+        lines.append(f"⚡ {snap.terminal_active} 个终端命令执行中")
+    else:
+        lines.append("💤 当前空闲 · 无活动")
     return "\n".join(lines)
 
 
@@ -327,6 +354,15 @@ class Monitor:
                 await asyncio.sleep(wait)
                 await self.update_card(topic, time.time(), force=True)
             self._flush[topic_id] = asyncio.create_task(later())
+
+    async def tool_finished_event(self, topic_id: int, now: float | None = None):
+        """工具结束也属于进展；立即刷新卡片，避免上一条命令看起来仍在执行。"""
+        now = now or time.time()
+        topic = _topics.get(topic_id)
+        if not topic or topic.state == "idle":
+            return
+        topic.last_progress = now
+        await self.update_card(topic, now, force=True)
 
     def _paused(self) -> bool:
         """限流暂停中，或本分钟额度已用完。"""
@@ -435,6 +471,7 @@ class Monitor:
         if topic.state == "idle":
             topic.turn_started = None
             _last_tool.pop(topic.topic_id, None)
+            _active_tools.pop(topic.topic_id, None)
             _tool_count.pop(topic.topic_id, None)
             for message_id in _user_msgs.pop(topic.topic_id, []):  # 这一轮做完：👀 → 👌
                 await react(self.bot, self.chat_id, message_id, "👌")
@@ -591,6 +628,7 @@ def note_abort(topic_id: int) -> int | None:
     if not topic:
         return None
     _user_msgs.pop(topic_id, None)  # 被中断的保持 👀，不标“完成”
+    _active_tools.pop(topic_id, None)
     card, topic.card_id, topic.turn_started = topic.card_id, None, None
     _save_cards()
     return card
