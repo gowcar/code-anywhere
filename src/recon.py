@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 # —— 防膨胀红线 & 注入控量 ——
@@ -24,6 +25,44 @@ SESSION_CTX_MAX_BYTES = 2048         # 单次 SessionStart 注入上限（控制
 ATTACHMENTS_KEEP = 20                # .attachments 保留最近 N 个附件
 
 RECON_DIR = "recon"
+
+
+def resolve_project_root(cwd: str) -> Path:
+    """Resolve a session cwd to the project root used by recon.
+
+    Prefer the nearest ancestor that already owns a recon/PROGRESS.md.  This
+    preserves nested projects with their own external brain.  For a new
+    project, fall back to the Git worktree root; only non-Git directories use
+    cwd itself.
+    """
+    root = Path(cwd).expanduser()
+    try:
+        root = root.resolve()
+    except OSError:
+        root = root.absolute()
+
+    if not root.is_dir():
+        return root
+
+    for candidate in (root, *root.parents):
+        if (candidate / RECON_DIR / "PROGRESS.md").is_file():
+            return candidate
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        git_root = Path(result.stdout.strip()).resolve()
+        if git_root.is_dir():
+            return git_root
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return root
 
 
 # ————————————————————————————————————————————————————————————————
@@ -99,7 +138,7 @@ def ensure_skeleton(cwd: str) -> bool:
     Returns: True 表示本次新建了 PROGRESS.md（首次建骨架）。
     """
     try:
-        root = Path(cwd)
+        root = resolve_project_root(cwd)
         if not root.is_dir():
             return False
         recon = root / RECON_DIR
@@ -175,7 +214,7 @@ def build_session_context(cwd: str) -> str | None:
     无 recon/ 返回 None。
     """
     try:
-        recon = Path(cwd) / RECON_DIR
+        recon = resolve_project_root(cwd) / RECON_DIR
         progress = recon / "PROGRESS.md"
         if not progress.exists():
             return None
