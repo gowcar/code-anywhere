@@ -1,11 +1,17 @@
 ---
 name: shared-browser
-description: 用 code-anywhere 共享浏览器（browser MCP，Playwright 全部能力）打开网页、操作页面、截图、抓取信息；遇到登录/SSO/二次验证/验证码等需要人的步骤时，用 request_browser_help 在 TG 里请用户一键接管同一个浏览器。凡是需要浏览器的任务（查内部平台 SPACE/SDP/SWP/GitLab 网页、验证网页功能、登录后取数据）都优先用它，不要自己另外启动浏览器。
+description: 用 code-anywhere 共享浏览器（browser MCP，Playwright 全部能力）处理需要真实页面交互或浏览器状态的任务，例如登录后的内部平台、功能验证、表单、截图、下载和用户接管。普通公开网页检索或公开文档查阅不要用本技能，优先用常规 Web Search/Web Fetch。
 ---
 
 # 共享浏览器（code-anywhere）
 
 本机有一个所有会话共用的浏览器池（2 个槽位，有界面，跑在虚拟屏幕里）。你通过 **browser MCP** 使用它：工具就是官方 Playwright MCP 的全部工具（`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_take_screenshot`、`browser_evaluate`、`browser_tabs`、`browser_pdf_save`、网络与控制台查看等）。
+
+## 适用边界
+
+- 普通公开网页检索、事实查询、公开帮助文档阅读：默认使用常规 Web Search/Web Fetch，避免占用共享浏览器槽位。
+- 需要登录态、页面交互、真实 UI/功能验证、表单提交、截图、下载、浏览器网络/控制台检查，或需要用户接管完成登录/验证码：使用本技能。
+- 用户明确要求“用浏览器打开/操作/验证”时，也使用本技能。
 
 ## 基本用法
 
