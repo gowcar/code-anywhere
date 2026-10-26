@@ -11,7 +11,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from src import backends
+from src import backends, procinfo
 from src.config import PROJECT_ROOT
 
 RECEIPTS = PROJECT_ROOT / '.agent-message-receipts.sqlite3'
@@ -61,9 +61,23 @@ def tail_events(path, offset=None, limit=262144):
         return []
 
 
+_ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+# 输入框里的灰色文字（ESC[2m）是 Claude 的输入建议 / Codex 的占位提示，不是用户草稿
+_DIM_TEXT = re.compile(r'\x1b\[2m[^\x1b]*')
+
+
+def _prompt_is_empty(raw_line):
+    text = _ANSI.sub('', _DIM_TEXT.sub('', raw_line))
+    return re.match(r'^\s*[›❯]\s*(Ask Codex to do anything)?\s*$', text)
+
+
 def screen_state(screen):
-    """Best-effort UI evidence; absence of a spinner does not mean idle."""
-    lines = screen.splitlines()[-35:]
+    """Best-effort UI evidence; absence of a spinner does not mean idle.
+
+    screen 可以带颜色（capture-pane -e）：靠它区分输入框里的灰色建议和用户真正打的草稿。
+    """
+    raw_lines = screen.splitlines()[-35:]
+    lines = [_ANSI.sub('', line) for line in raw_lines]
     for line in reversed(lines):
         if re.search(r'esc to interrupt|ctrl\+c to interrupt', line, re.I):
             return 'running', 'terminal shows interruptible work'
@@ -76,7 +90,7 @@ def screen_state(screen):
     tail = '\n'.join(lines)
     if claude_running(tail) or codex_running(tail):
         return 'running', 'terminal shows a working spinner'
-    if any(re.match(r'^\s*[›❯]\s*(Ask Codex to do anything)?\s*$', line) for line in lines):
+    if any(_prompt_is_empty(line) for line in raw_lines):
         return 'waiting_input', 'terminal shows an empty input prompt (heuristic)'
     return 'unknown', 'no reliable status indicator visible'
 
@@ -91,14 +105,14 @@ async def _transcript(pane, cwd, backend, pid):
     if tagged and Path(tagged['transcript_path']).exists():
         return tagged['session_id'], tagged['transcript_path']
     try:
-        args = Path(f'/proc/{pid}/cmdline').read_bytes().decode().split('\0')
+        args = procinfo.args(pid)
         sid = next((args[i + 1] for i, arg in enumerate(args[:-1])
                     if arg in {'--resume', '-r', '--session-id'}
                     and re.fullmatch(r'[a-f0-9-]{36}', args[i + 1])), None)
         if sid:
             for path in (Path.home() / '.claude/projects').glob(f'*/{sid}.jsonl'):
                 return sid, str(path)
-        out = await backends.command('lsof', '-a', '-p', pid, '-Fn')
+        out = await backends.command(procinfo.LSOF, '-a', '-p', pid, '-Fn')
         for line in out.splitlines():
             if line.startswith('n') and line.endswith('.jsonl') and '/.claude/projects/' in line:
                 path = Path(line[1:])
@@ -122,16 +136,14 @@ async def discover():
             if len(pids) != 1:
                 continue  # do not guess which of several processes owns input
             pid = pids[0]
-            try:
-                # Linux process start ticks prevent recycled PIDs matching old IDs.
-                stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-                start = stat[19]
-                actual_cwd = str(Path(f'/proc/{pid}/cwd').resolve(strict=True))
-            except OSError:
+            # 启动标记防止回收的 PID 对上旧会话 ID；Linux / macOS 取法不同，见 procinfo
+            start = procinfo.start_token(pid)
+            actual_cwd = procinfo.cwd(pid)
+            if not start or not actual_cwd:
                 continue
             found = await _transcript(pane, actual_cwd, backend, pid)
             path = found[1] if found else None
-            screen = await backends.command('tmux', 'capture-pane', '-p', '-t', pane)
+            screen = await backends.command('tmux', 'capture-pane', '-e', '-p', '-t', pane)
             status, evidence = screen_state(screen)
             events = tail_events(path)
             summary, summary_role, model = '', None, ''

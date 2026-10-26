@@ -11,6 +11,7 @@ import shlex
 import tomllib
 from pathlib import Path
 
+from src import procinfo
 from src.config import PROJECT_ROOT
 
 PREFERENCES_FILE = PROJECT_ROOT / ".backends.json"
@@ -125,7 +126,7 @@ item_completed events. lsof is present on the supported macOS host.
 """
     for pid in await pane_processes(pane, "codex"):
         try:
-            files = await command("lsof", "-a", "-p", pid, "-Fn")
+            files = await command(procinfo.LSOF, "-a", "-p", pid, "-Fn")
             for line in files.splitlines():
                 if not line.startswith("n") or not line.endswith(".jsonl"):
                     continue
@@ -146,10 +147,7 @@ item_completed events. lsof is present on the supported macOS host.
                     # An open process survives a directory rename, while its
                     # immutable rollout metadata still contains the old path.
                     # Only the actual owning process's cwd can prove the move.
-                    try:
-                        matches = Path(f"/proc/{pid}/cwd").resolve(strict=True) == requested_cwd
-                    except OSError:
-                        pass
+                    matches = procinfo.cwd(pid) == str(requested_cwd)
                 if matches:
                     sid = payload.get("id") or payload.get("session_id")
                     if sid:

@@ -17,7 +17,8 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         temporary_roots = patch('src.image_delivery._temporary_roots', ())
         temporary_roots.start()
         self.addCleanup(temporary_roots.stop)
-        self.root = Path(self.temp.name)
+        # macOS 的临时目录 /var 是 /private/var 的软链接；代码按真实路径判断范围
+        self.root = Path(self.temp.name).resolve()
         self.picture = self.root / 'screen shot.png'
         self.picture.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
         self.text = f'![screen](<{self.picture}>) [again](screen%20shot.png)'
@@ -48,9 +49,9 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_code_path_temp_uri_and_command_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
-            picture = Path(directory) / 'claude-passkey-display.png'
+            picture = Path(directory).resolve() / 'claude-passkey-display.png'
             picture.write_bytes(b'image')
-            with patch('src.image_delivery._temporary_roots', (Path(directory),)):
+            with patch('src.image_delivery._temporary_roots', (Path(directory).resolve(),)):
                 self.assertEqual(linked_images(f'截图：`{picture}`', str(self.root)), [picture])
                 self.assertEqual(linked_images(f'`{picture.as_uri()}`', str(self.root)), [picture])
                 text = f'`cat {picture}`\n\n```sh\n{picture}\n```\n`https://example.com/a.png`'
@@ -94,11 +95,11 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_temp_qr_link_uploads_original(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'seatalk-live-sync-profile-qr.png'
+            path = Path(directory).resolve() / 'seatalk-live-sync-profile-qr.png'
             path.write_bytes(self.picture.read_bytes())
             fake = SimpleNamespace(send_document=AsyncMock(return_value=SimpleNamespace(message_id=60)),
                                    send_message=AsyncMock())
-            with patch('src.image_delivery._temporary_roots', (Path(directory),)):
+            with patch('src.image_delivery._temporary_roots', (Path(directory).resolve(),)):
                 receipts = await send_linked_images(fake, f'[扫码二维码]({path})', str(self.root), 34, 206)
                 self.assertEqual(linked_images(f'[QR]({path.as_uri()})', str(self.root)), [path])
                 # Internal viewing outside the delivery directory still does not publish.
@@ -109,7 +110,7 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_and_out_of_scope_links_report_failure(self):
         with tempfile.TemporaryDirectory() as directory:
-            outside = Path(directory) / 'outside.png'; outside.write_bytes(b'image')
+            outside = Path(directory).resolve() / 'outside.png'; outside.write_bytes(b'image')
             fake = SimpleNamespace(send_document=AsyncMock(), send_message=AsyncMock())
             with self.assertLogs('code-anywhere.images', level='WARNING'):
                 receipts = await send_linked_images(
@@ -122,12 +123,12 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_temp_wrong_owner_and_project_symlink_cannot_escape(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'other.png'; path.write_bytes(b'image')
+            path = Path(directory).resolve() / 'other.png'; path.write_bytes(b'image')
             (self.root / 'escape.png').symlink_to(path)
-            with patch('src.image_delivery._temporary_roots', (Path(directory),)), \
+            with patch('src.image_delivery._temporary_roots', (Path(directory).resolve(),)), \
                  patch('src.image_delivery.os.getuid', return_value=-1):
                 self.assertEqual(linked_images(f'[QR]({path})', str(self.root)), [])
-            with patch('src.image_delivery._temporary_roots', (Path(directory),)):
+            with patch('src.image_delivery._temporary_roots', (Path(directory).resolve(),)):
                 self.assertEqual(linked_images('[escape](escape.png)', str(self.root)), [])
 
     async def test_oversize_link_reports_failure(self):

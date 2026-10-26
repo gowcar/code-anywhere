@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from src import procinfo
 from src.stdio_mcp import StdioMCP
 
 mcp = StdioMCP('code-anywhere-sessions')
@@ -19,16 +20,12 @@ def caller_processes():
     for _ in range(32):
         if pid <= 1:
             break
-        try:
-            raw = Path(f'/proc/{pid}/stat').read_text()
-            close = raw.rfind(')')
-            name = raw[raw.find('(') + 1:close]
-            fields = raw[close + 2:].split()
-            if name in {'codex', 'claude'}:
-                found.append((str(pid), fields[19]))
-            pid = int(fields[1])
-        except (OSError, ValueError, IndexError):
+        if procinfo.name(pid) in {'codex', 'claude'} and (start := procinfo.start_token(pid)):
+            found.append((str(pid), start))
+        parent = procinfo.parent(pid)
+        if parent is None:
             break
+        pid = parent
     return found
 
 

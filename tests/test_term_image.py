@@ -14,6 +14,17 @@ class ParseTests(unittest.TestCase):
         rows = term_image.parse("⎿ ok\n⏵⏵ on\n\n\n")
         self.assertEqual(["".join(ch for ch, _ in r) for r in rows], ["└ ok", "▸▸ on"])
 
+    def test_osc_hyperlinks_stripped_with_either_terminator(self):
+        st = "\x1b]8;id=1;https://a.example/release\x1b\\https://a.example/release\x1b]8;;\x1b\\ OK"
+        bel = "\x1b]8;;https://b.example\x07link\x1b]8;;\x07"
+        rows = term_image.parse(st + "\n" + bel)
+        self.assertEqual(["".join(ch for ch, _ in r) for r in rows], ["https://a.example/release OK", "link"])
+
+    def test_cjk_font_has_chinese_glyphs(self):
+        # 退回无中文字形的等宽字体时，所有汉字都会画成同一个方框
+        font = term_image._font("cjk")
+        self.assertNotEqual(font.getmask("中").getbbox(), font.getmask("文").getbbox())
+
     def test_wide_chars_take_two_cells(self):
         self.assertEqual(term_image._width("中"), 2)
         self.assertEqual(term_image._width("a"), 1)
