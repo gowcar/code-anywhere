@@ -86,6 +86,7 @@ class ClaudeLateWatcherTests(unittest.TestCase):
             with patch('src.projects.claude_dir', return_value=folder), \
                  patch('src.projects.get_topic', return_value=7), \
                  patch.object(backends, 'get_backend', return_value='claude'), \
+                 patch.object(backends, 'claude_session', AsyncMock(return_value=None)), \
                  patch.object(backends, 'pane_processes', AsyncMock(return_value=['claude'])), \
                  patch.object(api_server, '_watch_transcript', fake_watch), \
                  patch.object(api_server, '_bot', object()), \
@@ -130,6 +131,7 @@ class WatchResumeTests(unittest.TestCase):
         with patch('src.projects.claude_dir', return_value=folder), \
              patch('src.projects.get_topic', return_value=7), \
              patch.object(backends, 'get_backend', return_value='claude'), \
+             patch.object(backends, 'claude_session', AsyncMock(return_value=None)), \
              patch.object(backends, 'pane_processes', AsyncMock(return_value=['claude'])), \
              patch.object(api_server, '_watch_transcript', fake_watch), \
              patch.object(api_server, '_bot', object()), \
@@ -200,6 +202,23 @@ class PreferencesTests(unittest.TestCase):
                    {'type': 'response_item', 'payload': {'type': 'message', 'role': 'assistant', 'content': 'duplicate'}}]:
             self.assertIsNone(backends.normalize_codex(ev))
 
+    def test_codex_async_question_parser(self):
+        event = {'type': 'response_item', 'payload': {
+            'type': 'function_call', 'name': 'request_user_input_async',
+            'id': 'fc-1', 'call_id': 'call-1',
+            'arguments': json.dumps({'questions': [{
+                'title': '白名单是否提交？',
+                'options': ['已提交', '尚未提交', '不确定'],
+            }]}, ensure_ascii=False),
+        }}
+        self.assertEqual(backends.codex_async_question(event), {
+            'id': 'call-1',
+            'questions': [{'title': '白名单是否提交？',
+                           'options': ['已提交', '尚未提交', '不确定']}],
+        })
+        event['payload']['arguments'] = '{'
+        self.assertIsNone(backends.codex_async_question(event))
+
 
 class AsyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -239,6 +258,74 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api_server._bot.send_message.await_count, 1)
         self.assertIn('你好', api_server._bot.send_message.call_args.kwargs['text'])
         self.assertEqual(len(api_server._event_replay['sid']), 1)
+
+    async def test_codex_async_question_becomes_buttons_and_answer_message(self):
+        cwd = self.temp.name; backends.set_backend(cwd, 'codex')
+        api_server.terminal_sessions['sid'] = {'cwd': cwd, 'backend': 'codex', 'tmux_pane': '%9'}
+        api_server._bot.send_message.return_value = SimpleNamespace(message_id=71)
+        call_id = 'call-question-1'
+        question = {'type': 'response_item', 'payload': {
+            'type': 'function_call', 'name': 'request_user_input_async',
+            'call_id': call_id,
+            'arguments': json.dumps({'questions': [{
+                'title': '白名单是否提交？',
+                'options': ['已提交', '尚未提交', '不确定'],
+            }]}, ensure_ascii=False),
+        }}
+        duplicate = item('AgentMessage', '白名单是否提交？\n- 已提交\n- 尚未提交\n- 不确定', call_id)
+        path = Path(cwd) / 'rollout-question.jsonl'
+        path.write_text(json.dumps(question, ensure_ascii=False) + '\n' +
+                        json.dumps(duplicate, ensure_ascii=False) + '\n')
+        with patch.object(api_server, 'broadcast_event'), \
+             patch('src.bot._inject_tmux', new=AsyncMock()) as inject, \
+             patch.dict(api_server._pending_menus, {}, clear=True), \
+             patch.dict(api_server._pending_tg_inputs, {}, clear=True):
+            task = asyncio.create_task(api_server._watch_transcript(
+                'sid', str(path), 12, 34, start_pos=0))
+            try:
+                for _ in range(30):
+                    if api_server._pending_menus:
+                        break
+                    await asyncio.sleep(.05)
+                self.assertEqual(api_server._bot.send_message.await_count, 1)
+                kwargs = api_server._bot.send_message.call_args.kwargs
+                self.assertIn('白名单是否提交', kwargs['text'])
+                self.assertIsNotNone(kwargs['reply_markup'])
+                token = next(iter(api_server._pending_menus))
+                self.assertEqual(await api_server.handle_menu_select(token, 0, 1), 'submitted')
+                inject.assert_awaited_once_with('%9', '尚未提交')
+                self.assertEqual(api_server._pending_tg_inputs, {12: ['尚未提交']})
+            finally:
+                task.cancel()
+                await task
+
+    async def test_restart_recovers_only_current_queued_codex_question(self):
+        cwd = self.temp.name; backends.set_backend(cwd, 'codex')
+        api_server.terminal_sessions['sid'] = {'cwd': cwd, 'backend': 'codex', 'tmux_pane': '%9'}
+        api_server._bot.send_message.return_value = SimpleNamespace(message_id=72)
+
+        def question(call_id, title):
+            return {'type': 'response_item', 'payload': {
+                'type': 'function_call', 'name': 'request_user_input_async',
+                'call_id': call_id,
+                'arguments': json.dumps({'questions': [{
+                    'title': title, 'options': ['是', '否'],
+                }]}, ensure_ascii=False),
+            }}
+
+        path = Path(cwd) / 'rollout-recover.jsonl'
+        path.write_text(json.dumps(question('old-call', '旧问题'), ensure_ascii=False) + '\n' +
+                        json.dumps(question('current-call', '当前问题'), ensure_ascii=False) + '\n')
+        screen = '• Queued follow-up inputs\n  ? 1 question\n    shift+← to answer\n'
+        with patch.object(backends, 'command', AsyncMock(return_value=screen)), \
+             patch.dict(api_server._pending_menus, {}, clear=True):
+            recovered = await api_server._recover_codex_async_menus(
+                path, 'sid', '%9', 34, 12)
+            self.assertEqual(recovered, {'current-call'})
+            self.assertEqual(len(api_server._pending_menus), 1)
+            menu = next(iter(api_server._pending_menus.values()))
+            self.assertEqual(menu['questions'][0]['question'], '当前问题')
+            self.assertEqual(menu['submit_mode'], 'message')
 
     async def test_restart_skips_history_and_switch_stops_output(self):
         cwd = self.temp.name; backends.set_backend(cwd, 'codex')

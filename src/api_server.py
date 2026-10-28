@@ -18,6 +18,7 @@ Web client 总线（web admin 接入用）：
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections import defaultdict, deque
@@ -82,15 +83,13 @@ def _consume_tg_reply(topic_id: int) -> int | None:
     return _pending_tg_reply.pop(topic_id, None)
 
 
-# ============ AskUserQuestion 菜单 → TG inline keyboard ============
-# 三形态：单问单选（点即提交）/ 单问多选 / 多页表单（累积各页选择后一次提交）。
-# 按键机制（sandbox 实测）：单选项 Down×idx+Enter（选中且自动前进到下一页/Submit）；
-# 多选项 Down 定位 + Space toggle；Tab 切下一页签；Submit 页 Enter 提交。每页光标初始在第0项。
-# 关键事实：菜单等待时 tool_use(AskUserQuestion) 已结构化写入 transcript，watcher 直接可读。
+# ============ Agent 选择题 → TG inline keyboard ============
+# Claude AskUserQuestion 是阻塞式终端菜单，提交时注入方向键；Codex
+# request_user_input_async 是非阻塞提问，按钮答案作为新的用户消息注入。
 _pending_menus: dict[str, dict] = {}
 # token → {topic_id, chat_id, pane, msg_id,
 #          questions:[{header,question,multiSelect,options:[label,...]}],
-#          selections:{qi: int|None(单选) | set(多选)}}
+#          selections:{qi: int|None(单选) | set(多选)}, submit_mode: keys|message}
 
 
 def _menu_token(tool_use_id: str) -> str:
@@ -128,8 +127,8 @@ def menu_keyboard_for(token: str):
 
 
 async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
-                      tool_use_id: str, tinput: dict) -> bool:
-    """AskUserQuestion → TG inline keyboard。返回 True=已接管。"""
+                      tool_use_id: str, tinput: dict, submit_mode: str = "keys") -> bool:
+    """Structured agent question → TG inline keyboard. True means handled."""
     import html as _html
 
     questions = tinput.get("questions") or []
@@ -142,12 +141,16 @@ async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
 
     qs = []
     for q in questions:
-        opts = [(o.get("label") or "?") for o in (q.get("options") or [])]
+        opts = []
+        for option in q.get("options") or []:
+            label = option if isinstance(option, str) else option.get("label")
+            if label:
+                opts.append(str(label))
         if not opts:
             return False
         qs.append({
             "header": q.get("header") or "",
-            "question": q.get("question") or "",
+            "question": q.get("question") or q.get("title") or "",
             "multiSelect": bool(q.get("multiSelect")),
             "options": opts,
         })
@@ -157,6 +160,7 @@ async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
         "topic_id": topic_id, "chat_id": chat_id, "pane": pane, "msg_id": None,
         "questions": qs,
         "selections": {qi: (set() if q["multiSelect"] else None) for qi, q in enumerate(qs)},
+        "submit_mode": submit_mode,
     }
 
     if len(qs) == 1:
@@ -186,6 +190,55 @@ async def _offer_menu(chat_id: int, topic_id: int, session_id: str,
         pass
     log.info(f"[menu] offered token={token} topic={topic_id} questions={len(qs)}")
     return True
+
+
+async def _recover_codex_async_menus(path: Path, session_id: str, pane: str,
+                                     chat_id: int, topic_id: int) -> set[str]:
+    """Re-offer Codex async questions that remain queued across a bot restart."""
+    try:
+        screen = await backends.command("tmux", "capture-pane", "-p", "-t", pane)
+    except Exception:
+        return set()
+    if "Queued follow-up inputs" not in screen:
+        return set()
+    match = re.search(r"\?\s+(\d+)\s+questions?\b", screen)
+    if not match or int(match.group(1)) <= 0:
+        return set()
+    pending_count = int(match.group(1))
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - 4 * 1024 * 1024))
+            if handle.tell():
+                handle.readline()
+            rows = handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return set()
+    questions = []
+    for row in rows:
+        try:
+            parsed = backends.codex_async_question(json.loads(row))
+        except (ValueError, TypeError):
+            parsed = None
+        if parsed and parsed.get("id"):
+            questions.append(parsed)
+    selected = []
+    remaining = pending_count
+    for question in reversed(questions):
+        selected.append(question)
+        remaining -= max(1, len(question.get("questions") or []))
+        if remaining <= 0:
+            break
+    recovered = set()
+    for question in reversed(selected):
+        if await _offer_menu(
+            chat_id, topic_id, session_id, question["id"],
+            {"questions": question["questions"]}, submit_mode="message",
+        ):
+            recovered.add(question["id"])
+    if recovered:
+        log.info("[menu] recovered Codex async questions topic=%s ids=%s", topic_id, sorted(recovered))
+    return recovered
 
 
 async def _inject_keys(pane: str, keys: list[str]):
@@ -231,9 +284,30 @@ async def _submit_menu(token: str) -> bool:
     m = _pending_menus.pop(token, None)
     if not m:
         return False
-    keys = _build_keys(m)
-    await _inject_key_seq(m["pane"], keys)
-    log.info(f"[menu] submitted token={token} keys={keys}")
+    if m.get("submit_mode") == "message":
+        answers = []
+        for qi, q in enumerate(m["questions"]):
+            selected = m["selections"].get(qi)
+            if isinstance(selected, set):
+                labels = [q["options"][i] for i in sorted(selected)]
+                answer = "、".join(labels)
+            elif isinstance(selected, int):
+                answer = q["options"][selected]
+            else:
+                answer = ""
+            if len(m["questions"]) == 1:
+                answers.append(answer)
+            else:
+                answers.append(f"{qi + 1}. {q['question']}：{answer}")
+        text = "\n".join(answers)
+        mark_tg_input(m["topic_id"], text)
+        from src.bot import _inject_tmux
+        await _inject_tmux(m["pane"], text)
+        log.info("[menu] submitted async answer token=%s text=%s", token, text)
+    else:
+        keys = _build_keys(m)
+        await _inject_key_seq(m["pane"], keys)
+        log.info(f"[menu] submitted token={token} keys={keys}")
     return True
 
 
@@ -441,8 +515,15 @@ async def register_pane_watcher(pane_id: str, cwd: str, start_offsets: dict[str,
         if saved is not None and saved < file_size:
             log.info("[register_pane] 从上次转发位置补发 %s 字节 sid=%s", file_size - saved, sid)
             start_pos = saved
+    recovered_question_ids = set()
+    if backend == "codex" and start_pos == file_size:
+        recovered_question_ids = await _recover_codex_async_menus(
+            latest, sid, pane_id, config.CHAT_ID, topic_id)
+    watch_kwargs = {"start_pos": start_pos}
+    if recovered_question_ids:
+        watch_kwargs["suppressed_async_question_ids"] = recovered_question_ids
     _watchers[sid] = asyncio.create_task(_watch_transcript(
-        sid, str(latest), topic_id, config.CHAT_ID, start_pos=start_pos))
+        sid, str(latest), topic_id, config.CHAT_ID, **watch_kwargs))
     log.info("[register_pane] %s %s pane=%s sid=%s topic=%s offset=%s", backend, Path(cwd).name, pane_id, sid, topic_id, start_pos)
     return True
 
@@ -583,7 +664,9 @@ async def _tg_send(**kwargs):
             await asyncio.sleep(wait + 1)
 
 
-async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int, start_pos: int | None = None):
+async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: int,
+                            start_pos: int | None = None,
+                            suppressed_async_question_ids: set[str] | None = None):
     """监听 JSONL 文件，流式转发终端输出到 TG"""
     import base64 as _b64
     import io as _io
@@ -592,6 +675,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
     seen_ids = set()
     sent_image_tool_ids: set[str] = set()  # 已发图的 tool_use_id（按 sid 维度去重）
     tool_use_image_paths: dict[str, str] = {}  # tool_use_id → 原图绝对路径（按白名单从 tool_use 块抓）
+    codex_async_question_ids: set[str] = set(suppressed_async_question_ids or ())
     last_pos = 0
 
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -702,6 +786,17 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                 if rotation.is_turn_end(event, backend):
                     _spawn_rotation(session_id, cwd, topic_id, path)
                 if backend == "codex":
+                    async_question = backends.codex_async_question(event)
+                    if async_question:
+                        offered = await _offer_menu(
+                            chat_id, topic_id, session_id,
+                            async_question.get("id") or "",
+                            {"questions": async_question["questions"]},
+                            submit_mode="message",
+                        )
+                        if offered and async_question.get("id"):
+                            codex_async_question_ids.add(async_question["id"])
+                        continue
                     lifecycle = turn_status.lifecycle(event)
                     if lifecycle:
                         current = turn_status.observe(session_id, event)
@@ -738,6 +833,10 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
 
                 if event_type in ("user", "assistant"):
                     log.info(f"[watcher] {event_type} event id={event_uuid}")
+
+                if event_type == "assistant" and event_uuid in codex_async_question_ids:
+                    codex_async_question_ids.discard(event_uuid)
+                    continue
 
                 # Fan-out 给 web SSE 订阅者（不阻塞 TG 发送）
                 try:

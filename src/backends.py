@@ -340,3 +340,29 @@ messages. Current CLI uses item_completed; older rollouts use agent_message.
             "origin": {"kind": "human"} if role == "user" else {},
             "message": {"role": role, "content": text if role == "user" else [
                 {"type": "text", "text": text}]}}
+
+
+def codex_async_question(event: dict) -> dict | None:
+    """Parse Codex's non-blocking request_user_input_async function call.
+
+    The TUI returns ``{"accepted": true}`` immediately and later treats the
+    user's answer as a new message, so the bridge must surface the structured
+    question before normalize_codex drops the internal response_item record.
+    """
+    if event.get("type") != "response_item":
+        return None
+    payload = event.get("payload", {})
+    if payload.get("type") != "function_call" or payload.get("name") != "request_user_input_async":
+        return None
+    arguments = payload.get("arguments") or {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("questions"), list):
+        return None
+    return {
+        "id": payload.get("call_id") or payload.get("id"),
+        "questions": arguments["questions"],
+    }
