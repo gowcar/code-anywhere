@@ -7,7 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src import api_server, backends
-from src.image_delivery import linked_images, send_linked_images, send_viewed_attachment
+from src.image_delivery import (
+    linked_attachments,
+    linked_images,
+    send_linked_attachments,
+    send_linked_images,
+    send_viewed_attachment,
+)
 
 
 class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -21,6 +27,8 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name).resolve()
         self.picture = self.root / 'screen shot.png'
         self.picture.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+        self.html = self.root / 'manual.html'
+        self.html.write_text('<!doctype html><title>Manual</title>')
         self.text = f'![screen](<{self.picture}>) [again](screen%20shot.png)'
 
     def test_links_spaces_reference_links_and_dedup(self):
@@ -46,6 +54,27 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipts, [(str(self.picture), 61)])
         fake.send_document.assert_awaited_once()
         self.assertEqual(linked_images('`./screen shot.png`', str(self.root)), [self.picture])
+
+    async def test_non_image_markdown_link_uploads_as_document(self):
+        fake = SimpleNamespace(send_document=AsyncMock(return_value=SimpleNamespace(message_id=63)),
+                               send_message=AsyncMock())
+        text = f'[下载 HTML 手册]({self.html})'
+        self.assertEqual(linked_attachments(text, str(self.root)), [self.html])
+        self.assertEqual(linked_images(text, str(self.root)), [])
+        receipts = await send_linked_attachments(fake, text, str(self.root), 34, 202)
+        self.assertEqual(receipts, [(str(self.html), 63)])
+        self.assertEqual(fake.send_document.call_args.kwargs['filename'], 'manual.html')
+
+    def test_non_image_code_path_and_editor_link_do_not_upload(self):
+        source = self.root / 'app.py'
+        source.write_text('print("ok")')
+        self.assertEqual(linked_attachments(f'路径：`{self.html}`', str(self.root)), [])
+        self.assertEqual(linked_attachments(f'[源码]({source}:12)', str(self.root)), [])
+
+    def test_extensionless_markdown_link_uploads(self):
+        archive = self.root / 'artifact'
+        archive.write_bytes(b'payload')
+        self.assertEqual(linked_attachments('[artifact](artifact)', str(self.root)), [archive])
 
     def test_code_path_temp_uri_and_command_exclusion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -147,7 +176,37 @@ class ImageDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('code-anywhere.images', level='ERROR'):
             receipts = await send_linked_images(bot, self.text + ' [second](second.png)', str(self.root), 34, 206)
         self.assertEqual(receipts, [(str(other), 56)])
-        self.assertIn('图片发送失败', bot.send_message.call_args.kwargs['text'])
+        self.assertIn('文件发送失败', bot.send_message.call_args.kwargs['text'])
+
+    async def test_watcher_uploads_linked_html_document(self):
+        def event(kind, uid, **kwargs):
+            return {'type': 'event_msg', 'payload': {'type': 'item_completed',
+                    'item': {'type': kind, 'id': uid, **kwargs}}}
+        text = f'[下载手册]({self.html})'
+        rollout = self.root / 'rollout-html.jsonl'
+        rollout.write_text(json.dumps(event('AgentMessage', 'reply-html', content=[
+            {'type': 'Text', 'text': text},
+        ])) + '\n')
+        fake = SimpleNamespace(send_document=AsyncMock(return_value=SimpleNamespace(message_id=64)),
+                               send_message=AsyncMock())
+        sessions = {'file-test': {'cwd': str(self.root), 'backend': 'codex'}}
+        with patch.object(api_server, '_bot', fake), \
+             patch.object(api_server, 'terminal_sessions', sessions), \
+             patch.object(backends, 'get_backend', return_value='codex'), \
+             patch.object(api_server, 'broadcast_event'):
+            task = asyncio.create_task(api_server._watch_transcript(
+                'file-test', str(rollout), 206, 34, start_pos=0))
+            try:
+                for _ in range(30):
+                    if fake.send_document.await_count:
+                        break
+                    await asyncio.sleep(.05)
+                self.assertEqual(fake.send_document.await_count, 1)
+                self.assertEqual(fake.send_document.call_args.kwargs['filename'], 'manual.html')
+                self.assertEqual(fake.send_message.await_count, 1)
+            finally:
+                task.cancel()
+                await task
 
     async def test_watcher_uploads_public_reply_once_ignores_internal_image(self):
         def event(kind, uid, **kwargs):

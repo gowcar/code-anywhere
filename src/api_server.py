@@ -871,8 +871,8 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 if text:
                                     liveness.note_activity(topic_id)  # 状态卡之后有了正式回复
                                     if backend == "codex":
-                                        from src.image_delivery import send_linked_images
-                                        await send_linked_images(
+                                        from src.image_delivery import send_linked_attachments
+                                        await send_linked_attachments(
                                             _bot, text,
                                             terminal_sessions.get(session_id, {}).get("cwd", ""),
                                             chat_id, topic_id,
