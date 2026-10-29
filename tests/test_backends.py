@@ -2,6 +2,8 @@
 import asyncio
 from collections import defaultdict, deque
 import json
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -241,6 +243,49 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
              patch.object(backends, 'command', AsyncMock(return_value='n' + str(path))):
             self.assertEqual(await backends.codex_transcript('%2', '/a'), ('right', str(path)))
             self.assertIsNone(await backends.codex_transcript('%2', '/wrong'))
+
+    async def test_codex_0165_uses_state_registry_when_rollout_is_closed(self):
+        codex_home = Path(self.temp.name) / 'codex-home'
+        codex_home.mkdir()
+        rollout = Path(self.temp.name) / 'rollout-current.jsonl'
+        rollout.write_text(json.dumps({'type': 'session_meta', 'payload': {
+            'id': 'current', 'cwd': self.temp.name}}) + '\n')
+        db = sqlite3.connect(codex_home / 'state_5.sqlite')
+        db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, archived INTEGER, updated_at INTEGER)')
+        db.execute('INSERT INTO threads VALUES (?, ?, ?, 0, 2)',
+                   ('current', str(rollout), self.temp.name))
+        db.commit(); db.close()
+        started = rollout.stat().st_mtime - 10
+        lstart = __import__('datetime').datetime.fromtimestamp(started).strftime('%a %b %d %H:%M:%S %Y')
+        async def command(*args):
+            return '' if args[0] == backends.procinfo.LSOF else lstart
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+             patch.object(backends, 'pane_processes', AsyncMock(return_value=['123'])), \
+             patch.object(backends, 'command', AsyncMock(side_effect=command)):
+            self.assertEqual(
+                await backends.codex_transcript('%2', self.temp.name),
+                ('current', str(rollout)),
+            )
+
+    async def test_state_registry_rejects_rollout_older_than_pane(self):
+        codex_home = Path(self.temp.name) / 'codex-home'
+        codex_home.mkdir()
+        rollout = Path(self.temp.name) / 'rollout-stale.jsonl'
+        rollout.write_text(json.dumps({'type': 'session_meta', 'payload': {
+            'id': 'stale', 'cwd': self.temp.name}}) + '\n')
+        db = sqlite3.connect(codex_home / 'state_5.sqlite')
+        db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, archived INTEGER, updated_at INTEGER)')
+        db.execute('INSERT INTO threads VALUES (?, ?, ?, 0, 2)',
+                   ('stale', str(rollout), self.temp.name))
+        db.commit(); db.close()
+        started = rollout.stat().st_mtime + 60
+        lstart = __import__('datetime').datetime.fromtimestamp(started).strftime('%a %b %d %H:%M:%S %Y')
+        async def command(*args):
+            return '' if args[0] == backends.procinfo.LSOF else lstart
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+             patch.object(backends, 'pane_processes', AsyncMock(return_value=['123'])), \
+             patch.object(backends, 'command', AsyncMock(side_effect=command)):
+            self.assertIsNone(await backends.codex_transcript('%2', self.temp.name))
 
     async def test_partial_utf8_line_and_duplicate_message_sent_once(self):
         cwd = self.temp.name; backends.set_backend(cwd, 'codex')

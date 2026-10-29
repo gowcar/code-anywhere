@@ -5,9 +5,11 @@ allowed to receive input or publish events for a project.
 """
 
 import asyncio
+from datetime import datetime
 import json
 import os
 import shlex
+import sqlite3
 import tomllib
 from pathlib import Path
 
@@ -124,7 +126,8 @@ async def codex_transcript(pane: str, cwd: str) -> tuple[str, str] | None:
 This also handles Codex paginated histories: the live rollout still contains
 item_completed events. lsof is present on the supported macOS host.
 """
-    for pid in await pane_processes(pane, "codex"):
+    pids = await pane_processes(pane, "codex")
+    for pid in pids:
         try:
             files = await command(procinfo.LSOF, "-a", "-p", pid, "-Fn")
             for line in files.splitlines():
@@ -153,6 +156,60 @@ item_completed events. lsof is present on the supported macOS host.
                     if sid:
                         return sid, str(path)
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+            continue
+
+    # Codex 0.165+ delegates thread persistence to app-server and no longer
+    # leaves the rollout open in the terminal process. Use Codex's own registry,
+    # constrained to files touched during this pane process lifetime.
+    for pid in pids:
+        try:
+            raw_started = await command("ps", "-p", pid, "-o", "lstart=")
+            started = datetime.strptime(" ".join(raw_started.split()), "%a %b %d %H:%M:%S %Y").timestamp()
+            found = _codex_state_transcript(cwd, started)
+            if found:
+                return found
+        except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+            continue
+    return None
+
+
+def _codex_state_transcript(cwd: str, process_started: float) -> tuple[str, str] | None:
+    """Resolve the newest valid Codex thread touched by the current process."""
+    codex_home = Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex")))
+    state_db = codex_home / "state_5.sqlite"
+    if not state_db.is_file():
+        return None
+    raw_cwd = str(Path(cwd))
+    target = str(Path(cwd).resolve())
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=1)
+        try:
+            rows = db.execute(
+                "SELECT id, rollout_path FROM threads "
+                "WHERE cwd IN (?, ?) AND COALESCE(archived, 0) = 0 "
+                "ORDER BY updated_at DESC LIMIT 10",
+                (raw_cwd, target),
+            ).fetchall()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error):
+        return None
+
+    for row_sid, raw_path in rows:
+        path = Path(raw_path or "")
+        try:
+            if not path.is_file() or path.stat().st_mtime < process_started - 5:
+                continue
+            with path.open() as f:
+                meta = json.loads(f.readline())
+            payload = meta.get("payload", {})
+            sid = payload.get("id") or payload.get("session_id")
+            if (meta.get("type") == "session_meta" and sid == row_sid
+                    and payload.get("cwd")
+                    and Path(payload["cwd"]).resolve() == Path(target)
+                    and not isinstance(payload.get("source"), dict)):
+                return sid, str(path)
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
     return None
 
