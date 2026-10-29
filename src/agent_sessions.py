@@ -11,11 +11,53 @@ import sqlite3
 import time
 from pathlib import Path
 
-from src import backends, procinfo
+from src import backends, config, procinfo, projects
 from src.config import PROJECT_ROOT
 
 RECEIPTS = PROJECT_ROOT / '.agent-message-receipts.sqlite3'
 _locks = {}
+SLEEPING_PREFIX = 'project:'
+
+
+def sleeping_target(session_id):
+    """Resolve a stable bound-project target exposed while no terminal is live."""
+    match = re.fullmatch(rf'{SLEEPING_PREFIX}(\d+)', session_id or '')
+    if not match:
+        return None
+    topic_id = int(match.group(1))
+    cwd = projects.all_bindings().get(topic_id)
+    if not cwd or not Path(cwd).is_dir():
+        return None
+    return topic_id, str(Path(cwd).resolve())
+
+
+def _same_project(session, cwd):
+    try:
+        return Path(session.get('cwd', '')).resolve() == Path(cwd).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+def _sleeping_session(topic_id, cwd):
+    backend = backends.get_backend(cwd)
+    native_sid = None
+    if backend == 'codex' and backends.SESSIONS_FILE.exists():
+        try:
+            native_sid = json.loads(backends.SESSIONS_FILE.read_text()).get(cwd)
+        except (OSError, ValueError):
+            pass
+    return {
+        'session_id': f'{SLEEPING_PREFIX}{topic_id}',
+        'native_session_id': native_sid,
+        'project': Path(cwd).name, 'cwd': cwd,
+        'backend': backend, 'tmux_pane': None, 'model': '',
+        'status': 'sleeping',
+        'status_evidence': 'bound project has no live terminal; send_message will wake it',
+        'activity': 'sleeping', 'last_turn': {},
+        'summary': '项目已绑定但终端休眠；send_message 会自动唤醒并恢复历史会话',
+        'summary_role': None, 'last_activity_at': None,
+        'observed_at': time.time(), '_transcript': None, '_sleeping': True,
+    }
 
 
 def public_text(event):
@@ -175,6 +217,38 @@ async def discover():
     return sessions
 
 
+async def discover_all():
+    """List live sessions plus bound projects that can be woken on delivery."""
+    sessions = await discover()
+    for topic_id, raw_cwd in projects.all_bindings().items():
+        try:
+            cwd = str(Path(raw_cwd).resolve())
+        except (OSError, ValueError):
+            continue
+        if not Path(cwd).is_dir() or any(_same_project(session, cwd) for session in sessions):
+            continue
+        try:
+            sessions.append(_sleeping_session(topic_id, cwd))
+        except (OSError, ValueError):
+            continue
+    return sessions
+
+
+async def _find_session(session_id, include_sleeping=True):
+    sessions = await discover()
+    exact = next((session for session in sessions if session['session_id'] == session_id), None)
+    if exact:
+        return exact
+    target = sleeping_target(session_id)
+    if not target:
+        return None
+    topic_id, cwd = target
+    live = next((session for session in sessions if _same_project(session, cwd)), None)
+    if live:
+        return live
+    return _sleeping_session(topic_id, cwd) if include_sleeping else None
+
+
 def receipt_seen(path, offset, marker):
     """Native receipt: a user message, or Claude's queued_command attachment for
     input that arrived mid-turn (inserted at the next tool call)."""
@@ -227,8 +301,9 @@ async def get_feedback(session_id, request_id=None):
                     db.commit()
                 finally:
                     db.close()
-    session = next((s for s in await discover() if s['session_id'] == session_id), None)
-    result = {'session_id': session_id, 'alive': session is not None,
+    session = await _find_session(session_id)
+    sleeping = bool(session and session.get('_sleeping'))
+    result = {'session_id': session_id, 'alive': bool(session and not sleeping),
               'activity': session.get('activity', session['status']) if session else 'exited',
               'last_turn': session.get('last_turn', {}) if session else {},
               'observed_at': time.time(), 'delivery': visible(receipt) if receipt else None,
@@ -236,6 +311,8 @@ async def get_feedback(session_id, request_id=None):
               'last_activity_at': session['last_activity_at'] if session else None,
               'activity_evidence': session['status_evidence'] if session else 'live process no longer found',
               'messages_available': bool(session and session['_transcript'])}
+    if session and session['session_id'] != session_id:
+        result['resolved_session_id'] = session['session_id']
     result.update(recent_messages(session['_transcript'] if session else None))
     sent_at = (receipt or {}).get('sent_at')
     result['activity_after_send'] = bool(result['last_activity_at'] > sent_at) if sent_at and result['last_activity_at'] else None
@@ -244,9 +321,13 @@ async def get_feedback(session_id, request_id=None):
 
 
 async def get_status(session_id):
-    for session in await discover():
-        if session['session_id'] == session_id:
-            return visible(session)
+    session = await _find_session(session_id)
+    if session:
+        result = visible(session)
+        if result['session_id'] != session_id:
+            result['resolved_session_id'] = result['session_id']
+            result['session_id'] = session_id
+        return result
     return {'session_id': session_id, 'status': 'exited',
             'status_evidence': 'not found in live terminal discovery', 'observed_at': time.time()}
 
@@ -295,9 +376,15 @@ async def send_message(session_id, text, request_id, sender=None, source_session
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', request_id or ''):
         raise ValueError('request_id required (1–128 letters, digits, _, ., :, -)')
     sender, source_session_id = await resolve_sender(source_session_id, sender)
+    target = sleeping_target(session_id)
     if source_session_id == session_id:
         return {'request_id': request_id, 'session_id': session_id,
                 'status': 'not_sent', 'detail': 'self-target forbidden', 'sender': sender}
+    if target and source_session_id:
+        source = next((s for s in await discover() if s['session_id'] == source_session_id), None)
+        if source and _same_project(source, target[1]):
+            return {'request_id': request_id, 'session_id': session_id,
+                    'status': 'not_sent', 'detail': 'self-target forbidden', 'sender': sender}
     fingerprint = hashlib.sha256(json.dumps([session_id, text, sender] + ([source_session_id] if source_session_id else [])
                                             + (['urgent'] if urgent else [])).encode()).hexdigest()
     allowed = URGENT_STATES if urgent else {'waiting_input'}
@@ -319,9 +406,23 @@ async def send_message(session_id, text, request_id, sender=None, source_session
         db.close()
     async with _locks.setdefault(session_id, asyncio.Lock()):
         try:
-            session = next((s for s in await discover() if s['session_id'] == session_id), None)
+            def matches(candidate):
+                return _same_project(candidate, target[1]) if target else candidate['session_id'] == session_id
+
+            session = next((s for s in await discover() if matches(s)), None)
+            if not session and target:
+                topic_id, cwd = target
+                from src.bot import _ensure_pane_for_project, _project_locks
+                async with _project_locks.setdefault(cwd, asyncio.Lock()):
+                    session = next((s for s in await discover() if matches(s)), None)
+                    if not session:
+                        await _ensure_pane_for_project(cwd, config.CHAT_ID, topic_id)
+                        session = next((s for s in await discover() if matches(s)), None)
+                if session:
+                    result['resolved_session_id'] = session['session_id']
             if not session:
-                result.update(status='not_sent', detail='session exited or changed; refresh list')
+                result.update(status='not_sent', detail='bound project could not be woken' if target else
+                              'session exited or changed; refresh list')
             elif session['status'] not in allowed:
                 result.update(status='not_sent', detail=(
                     f"target is {session['status']} (only idle or working sessions accept urgent messages)" if urgent else
@@ -334,7 +435,7 @@ async def send_message(session_id, text, request_id, sender=None, source_session
                 cwd = next((s['cwd'] for s in terminal_sessions.values()
                             if s.get('tmux_pane') == session['tmux_pane']), session['cwd'])
                 async with _project_locks.setdefault(cwd, asyncio.Lock()):
-                    current = next((s for s in await discover() if s['session_id'] == session_id), None)
+                    current = next((s for s in await discover() if matches(s)), None)
                     if not current or current['status'] not in allowed:
                         result.update(status='not_sent', detail='target changed or is no longer idle')
                     else:
@@ -396,7 +497,7 @@ async def send_message(session_id, text, request_id, sender=None, source_session
 
 async def handle_list(request):
     from aiohttp import web
-    return web.json_response({'sessions': [visible(s) for s in await discover()]})
+    return web.json_response({'sessions': [visible(s) for s in await discover_all()]})
 
 
 async def handle_status(request):

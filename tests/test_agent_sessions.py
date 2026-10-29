@@ -128,6 +128,42 @@ class SessionToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'not_sent')
         write.assert_not_awaited()
 
+    async def test_bound_project_is_listed_while_terminal_is_sleeping(self):
+        sessions_file = Path(self.tmp.name) / 'sessions.json'
+        sessions_file.write_text(json.dumps({self.tmp.name: 'native-saved'}))
+        with patch.object(service, 'discover', AsyncMock(return_value=[])), \
+             patch.object(service.projects, 'all_bindings', return_value={4703: self.tmp.name}), \
+             patch.object(service.backends, 'get_backend', return_value='codex'), \
+             patch.object(service.backends, 'SESSIONS_FILE', sessions_file):
+            sessions = await service.discover_all()
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['session_id'], 'project:4703')
+        self.assertEqual(sessions[0]['status'], 'sleeping')
+        self.assertEqual(sessions[0]['native_session_id'], 'native-saved')
+
+    async def test_send_message_wakes_sleeping_bound_project(self):
+        live = dict(self.session, backend='codex', project='sleeping-project')
+
+        async def inject(pane, text):
+            with self.path.open('a') as f:
+                f.write(json.dumps({'type': 'response_item', 'payload': {
+                    'type': 'message', 'role': 'user',
+                    'content': [{'type': 'input_text', 'text': text}]}}) + '\n')
+
+        discovered = AsyncMock(side_effect=[[], [], [live], [live]])
+        with patch.object(service.projects, 'all_bindings', return_value={4703: self.tmp.name}), \
+             patch.object(service, 'discover', discovered), \
+             patch.object(service.config, 'CHAT_ID', 123), \
+             patch('src.bot._ensure_pane_for_project', AsyncMock(return_value='%99')) as wake, \
+             patch('src.bot._inject_tmux', AsyncMock(side_effect=inject)) as write:
+            result = await service.send_message('project:4703', 'hello', 'wake-1')
+
+        self.assertEqual(result['status'], 'received')
+        self.assertEqual(result['session_id'], 'project:4703')
+        self.assertEqual(result['resolved_session_id'], live['session_id'])
+        wake.assert_awaited_once_with(self.tmp.name, 123, 4703)
+        write.assert_awaited_once()
+
     async def test_replaced_target_not_sent(self):
         with patch.object(service, 'discover', AsyncMock(side_effect=[[self.session], []])), \
              patch('src.bot._inject_tmux', AsyncMock()) as write:
