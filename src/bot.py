@@ -920,6 +920,44 @@ async def _hook_session_for_pane(pane_id: str, wait: float = 8.0) -> str | None:
     return None
 
 
+def _tmux_project_session_base(cwd: str) -> str:
+    """Return the human-facing tmux session name for one project."""
+    name = Path(cwd).resolve().name
+    name = re.sub(r"[^\w-]+", "-", name, flags=re.UNICODE).strip("-")
+    return (name or "project")[:80]
+
+
+async def _tmux_project_session(cwd: str) -> tuple[str, bool]:
+    """Choose a stable, collision-safe, project-owned tmux session."""
+    norm_cwd = str(Path(cwd).resolve())
+    try:
+        rows = await backends.command(
+            "tmux", "list-sessions", "-F", "#{session_name}\t#{@ca_project}",
+        )
+    except (OSError, RuntimeError, asyncio.TimeoutError):
+        rows = ""
+
+    sessions: dict[str, str] = {}
+    for row in rows.splitlines():
+        name, _, project = row.partition("\t")
+        if name:
+            sessions[name] = project
+        if project:
+            try:
+                if str(Path(project).resolve()) == norm_cwd:
+                    return name, True
+            except (OSError, RuntimeError):
+                pass
+
+    base = _tmux_project_session_base(norm_cwd)
+    candidate = base
+    suffix = 2
+    while candidate in sessions:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate, False
+
+
 async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None) -> str | None:
     """Start the selected native CLI in tmux, then attach its transcript watcher."""
     try:
@@ -927,37 +965,19 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     except Exception:
         return None
 
-    # 找一个已存在的 tmux session，没有就建
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "tmux", "list-sessions", "-F", "#{session_name}",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await proc.communicate()
-        sessions = [s for s in out.decode(errors="ignore").splitlines() if s.strip()]
-    except Exception:
-        sessions = []
+    # 每个项目拥有一个同名 tmux session，这样 SSH 执行 `t` 能与 Agent 列表直接对应。
+    tmux_session, session_exists = await _tmux_project_session(norm_cwd)
 
-    tmux_session = sessions[0] if sessions else "kin"
-    if not sessions:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "tmux", "new-session", "-d", "-s", tmux_session, "-c", str(Path.home()),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-        except Exception as e:
-            log.warning(f"[ensure_pane] tmux new-session failed: {e}")
-            return None
-
-    # 起 new-window 跑 claude；-P -F 拿新 pane id
+    # 起原生 CLI；-P -F 拿新 pane id。首个 pane 直接 new-session，休眠后复用尚存的项目 session 才 new-window。
     # 关键：tmux server env 通常无 CLAUDE_CODE_OAUTH_TOKEN，claude 会秒退 → 用 -e 从当前进程 env 显式传
     backend = backends.get_backend(cwd)
     proj_name = Path(norm_cwd).name + ("-codex" if backend == "codex" else "")
     tmux_env_args = backends.launch_env_args(backend)
+    tmux_action = "new-window" if session_exists else "new-session"
+    tmux_target = ["-t", f"={tmux_session}"] if session_exists else ["-d", "-s", tmux_session]
     try:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "new-window", "-t", tmux_session, "-c", norm_cwd, "-n", proj_name,
+            "tmux", tmux_action, *tmux_target, "-c", norm_cwd, "-n", proj_name,
             *tmux_env_args,
             "-P", "-F", "#{pane_id}",
             *(backends.codex_launch_args(cwd) if backend == "codex" else backends.claude_launch_args(cwd)),
@@ -965,16 +985,18 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
         )
         out, err = await proc.communicate()
         if proc.returncode != 0:
-            log.warning(f"[ensure_pane] tmux new-window failed: {err.decode(errors='ignore')}")
+            log.warning(f"[ensure_pane] tmux {tmux_action} failed: {err.decode(errors='ignore')}")
             return None
         pane_id = out.decode(errors="ignore").strip()
     except Exception as e:
-        log.warning(f"[ensure_pane] tmux new-window error: {e}")
+        log.warning(f"[ensure_pane] tmux {tmux_action} error: {e}")
         return None
 
     if not pane_id:
         return None
-    log.info(f"[ensure_pane] created pane={pane_id} for {proj_name}")
+    log.info(f"[ensure_pane] created session={tmux_session} pane={pane_id} for {proj_name}")
+    await backends.command("tmux", "set-option", "-t", f"={tmux_session}", "@ca_project", norm_cwd)
+    await backends.command("tmux", "set-option", "-t", f"={tmux_session}", "@label", f"Agent · {backend}")
     await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_project", norm_cwd)
     await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_backend", backend)
 
