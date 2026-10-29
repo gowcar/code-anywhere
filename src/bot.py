@@ -932,7 +932,7 @@ async def _tmux_project_session(cwd: str) -> tuple[str, bool]:
     norm_cwd = str(Path(cwd).resolve())
     try:
         rows = await backends.command(
-            "tmux", "list-sessions", "-F", "#{session_name}\t#{@ca_project}",
+            "tmux", "list-sessions", "-F", "#{session_name}\t#{@ca_session_project}",
         )
     except (OSError, RuntimeError, asyncio.TimeoutError):
         rows = ""
@@ -974,7 +974,8 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     proj_name = Path(norm_cwd).name + ("-codex" if backend == "codex" else "")
     tmux_env_args = backends.launch_env_args(backend)
     tmux_action = "new-window" if session_exists else "new-session"
-    tmux_target = ["-t", f"={tmux_session}"] if session_exists else ["-d", "-s", tmux_session]
+    # The trailing colon makes tmux resolve this as a session, not a similarly named window.
+    tmux_target = ["-t", f"{tmux_session}:"] if session_exists else ["-d", "-s", tmux_session]
     try:
         proc = await asyncio.create_subprocess_exec(
             "tmux", tmux_action, *tmux_target, "-c", norm_cwd, "-n", proj_name,
@@ -995,8 +996,8 @@ async def _ensure_pane_for_project(cwd: str, chat_id: int, topic_id: int | None)
     if not pane_id:
         return None
     log.info(f"[ensure_pane] created session={tmux_session} pane={pane_id} for {proj_name}")
-    await backends.command("tmux", "set-option", "-t", f"={tmux_session}", "@ca_project", norm_cwd)
-    await backends.command("tmux", "set-option", "-t", f"={tmux_session}", "@label", f"Agent · {backend}")
+    await backends.command("tmux", "set-option", "-t", f"{tmux_session}:", "@ca_session_project", norm_cwd)
+    await backends.command("tmux", "set-option", "-t", f"{tmux_session}:", "@label", f"Agent · {backend}")
     await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_project", norm_cwd)
     await backends.command("tmux", "set-option", "-p", "-t", pane_id, "@ca_backend", backend)
 
