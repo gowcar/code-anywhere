@@ -96,6 +96,7 @@ class RenderTests(unittest.TestCase):
         unit = setup.render("code-anywhere.service", REPO="/r", PATH="/p")
         self.assertNotIn("{{", unit)
         self.assertIn("ExecStart=/r/.venv/bin/python -m src.main", unit)
+        self.assertIn("KillMode=process", unit)
 
     def test_issue_desk_config_renders_template_completely(self):
         # issue-desk 的规则由 scripts/issue-desk-config 按平台和仓库表生成，不能留占位符

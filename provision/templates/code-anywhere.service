@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory={{REPO}}
 ExecStart={{REPO}}/.venv/bin/python -m src.main
+# tmux server may be created by the bridge, but its Agent panes must outlive a
+# bridge deploy/restart; only stop the Python bridge process itself.
+KillMode=process
 # 由 ./setup 按 claude/codex/node 的实际位置生成；换 node 版本后重跑 ./setup 即可
 Environment=PATH={{PATH}}
 Environment=PYTHONUNBUFFERED=1
