@@ -20,6 +20,12 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await service.discover(), [])
             processes.assert_not_awaited()
 
+    async def test_dead_pane_with_stripped_empty_path_is_ignored(self):
+        with patch.object(service.backends, 'command', AsyncMock(return_value='%13\t1')), \
+             patch.object(service.backends, 'pane_processes', AsyncMock()) as processes:
+            self.assertEqual(await service.discover(), [])
+            processes.assert_not_awaited()
+
     def test_exact_process_identity(self):
         self.assertEqual(mcp.source_session([self.source], [('123', '456')]), self.source['session_id'])
         with self.assertRaises(ValueError):

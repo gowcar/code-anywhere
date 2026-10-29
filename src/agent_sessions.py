@@ -170,7 +170,12 @@ async def discover():
                                   '#{pane_id}\t#{pane_dead}\t#{pane_current_path}')
     sessions = []
     for row in rows.splitlines():
-        pane, dead, cwd = row.split('\t', 2)
+        # backends.command strips trailing whitespace, so a dead pane with an
+        # empty current path arrives as "%7\t1" rather than three fields.
+        parts = row.split('\t', 2)
+        if len(parts) < 2:
+            continue
+        pane, dead = parts[:2]
         if dead == '1':
             continue  # dead panes retain a tty name that may belong to a new pane
         for backend in ('codex', 'claude'):
