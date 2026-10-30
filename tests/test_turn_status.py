@@ -93,6 +93,50 @@ class TurnStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.display_state('s', 'running')[0], 'running')
         self.assertFalse(state.get('s')['pending'])
 
+    def test_active_rollout_overrides_empty_composer_until_completion(self):
+        state.observe('s', event('task_started'))
+        self.assertEqual(state.display_state('s', 'waiting_input')[0], 'running')
+        state.observe('s', event('error', second=2, will_retry=True,
+                                 message=ERROR['message']))
+        self.assertEqual(state.display_state('s', 'waiting_input')[0], 'retrying')
+        state.observe('s', event('task_complete', second=3))
+        self.assertEqual(state.display_state('s', 'waiting_input')[0], 'waiting_input')
+
+    async def test_discovery_keeps_active_codex_turn_delivery_status_busy(self):
+        from src import agent_sessions
+
+        rollout = self.root / 'rollout.jsonl'
+        rollout.write_text(json.dumps(event('task_started')) + '\n')
+        with patch.object(agent_sessions.backends, 'command', AsyncMock(side_effect=[
+                '%1\t0\t/project',
+                'Working (37s • esc to interrupt)\n› Ask Codex to do anything',
+             ])), \
+             patch.object(agent_sessions.backends, 'pane_processes',
+                          AsyncMock(side_effect=[[123], []])), \
+             patch.object(agent_sessions.procinfo, 'start_token', return_value='start'), \
+             patch.object(agent_sessions.procinfo, 'cwd', return_value='/project'), \
+             patch.object(agent_sessions, '_transcript',
+                          AsyncMock(return_value=('s', str(rollout)))):
+            sessions = await agent_sessions.discover()
+        self.assertEqual(sessions[0]['status'], 'running')
+        self.assertEqual(sessions[0]['activity'], 'running')
+
+        # Even when the spinner is missed and only the empty composer is
+        # captured, the unfinished lifecycle event must still protect delivery.
+        with patch.object(agent_sessions.backends, 'command', AsyncMock(side_effect=[
+                '%1\t0\t/project',
+                '› Ask Codex to do anything',
+             ])), \
+             patch.object(agent_sessions.backends, 'pane_processes',
+                          AsyncMock(side_effect=[[123], []])), \
+             patch.object(agent_sessions.procinfo, 'start_token', return_value='start'), \
+             patch.object(agent_sessions.procinfo, 'cwd', return_value='/project'), \
+             patch.object(agent_sessions, '_transcript',
+                          AsyncMock(return_value=('s', str(rollout)))):
+            sessions = await agent_sessions.discover()
+        self.assertEqual(sessions[0]['status'], 'running')
+        self.assertIn('no completion event', sessions[0]['status_evidence'])
+
     async def test_unspecified_error_waits_for_final_outcome(self):
         state.observe('s', event('task_started'))
         state.observe('s', event('error', second=2, message=ERROR['message']))

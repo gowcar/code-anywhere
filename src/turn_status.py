@@ -155,6 +155,13 @@ def display_state(native_sid, screen_status):
         return ('retrying' if state.get('activity') == 'retrying' else 'running'), state
     if state.get('activity') == 'failed':
         return 'failed', state
+    # Codex keeps the empty composer visible while a turn is running.  A
+    # capture taken between spinner refreshes can therefore look idle even
+    # though the rollout has a task_started event with no matching terminal
+    # event yet.  The lifecycle record is stronger evidence than that prompt
+    # heuristic; keep the session busy until completion/abort is observed.
+    if state.get('activity') in {'running', 'retrying', 'error_pending'}:
+        return ('retrying' if state.get('activity') == 'retrying' else 'running'), state
     if screen_status == 'waiting_input':
         return 'waiting_input', state
     return screen_status, state

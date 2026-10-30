@@ -210,6 +210,10 @@ async def discover():
             if backend == 'codex' and native_sid:
                 turn_status.bootstrap(native_sid, path)
             display_status, last_turn = turn_status.display_state(native_sid, status)
+            if status == 'waiting_input' and display_status in {'running', 'retrying'}:
+                status = 'running'
+                evidence = ('rollout has an active turn with no completion event; '
+                            'empty composer is not reliable idle evidence')
             sessions.append({
                 'session_id': f'{backend}:{pane}:{pid}:{start}',
                 'native_session_id': found[0] if found else None,
