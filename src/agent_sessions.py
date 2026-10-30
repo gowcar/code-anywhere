@@ -125,6 +125,9 @@ def screen_state(screen):
             return 'running', 'terminal shows interruptible work'
         if re.search(r'Would you like to proceed|Do you want to proceed|Allow this|Approve once|Do you trust', line, re.I):
             return 'waiting_confirmation', 'terminal shows a confirmation prompt'
+    tail = '\n'.join(lines[-20:])
+    if 'Where should the new conversation run?' in tail and 'Current checkout' in tail:
+        return 'waiting_confirmation', 'terminal is waiting for the new-conversation location choice'
     # Newer Claude Code no longer prints "esc to interrupt"; its spinner line
     # ("· Simmering… (18s · ↓ 188 tokens)") is the evidence, while the empty
     # input box stays visible during work and must not read as idle.

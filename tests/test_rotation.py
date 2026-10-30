@@ -80,6 +80,28 @@ class RotationTests(unittest.IsolatedAsyncioTestCase):
             await self.turn_end()
         self.inject.assert_not_awaited()
 
+class ClearSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_new_accepts_current_checkout_picker(self):
+        screens = AsyncMock(side_effect=[
+            "› Ask Codex to do anything",       # initial idle check
+            "› /new",                          # first Enter only accepts command completion
+            "Where should the new conversation run?\n› 1. Current checkout\n  2. New worktree",
+            "Where should the new conversation run?\n› 1. Current checkout\n  2. New worktree",
+            "› Ask Codex to do anything",       # fresh thread ready
+        ])
+        command = AsyncMock()
+        with patch.object(bot.backends, "get_backend", return_value="codex"), \
+             patch.object(bot, "_find_pane_for_project", AsyncMock(return_value="%9")), \
+             patch.object(bot, "_capture_pane", screens), \
+             patch.object(bot.backends, "command", command), \
+             patch.object(bot.projects, "get_topic", return_value=None), \
+             patch.object(bot.asyncio, "sleep", AsyncMock()):
+            ok, detail = await bot.clear_session("/w")
+        self.assertTrue(ok)
+        self.assertEqual(detail, "/new")
+        enters = [call for call in command.await_args_list if call.args[-1] == "Enter"]
+        self.assertEqual(len(enters), 3)  # completion, submit /new, accept Current checkout
+
 
 if __name__ == "__main__":
     unittest.main()

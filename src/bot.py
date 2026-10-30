@@ -333,17 +333,49 @@ async def clear_session(cwd: str) -> tuple[bool, str]:
         command, read_input = ("/new", codex_input) if backend == "codex" else ("/clear", claude_input)
         await backends.command("tmux", "send-keys", "-t", pane, "-l", command)
         await asyncio.sleep(0.5)
+        submitted = False
         for _ in range(3):  # 第一次回车可能只是在命令补全菜单里选中，以输入框清空为准
             await backends.command("tmux", "send-keys", "-t", pane, "Enter")
             await asyncio.sleep(1.5)
             if read_input(await _capture_pane(pane)) != command:
+                submitted = True
                 break
+        if not submitted:
+            return False, f"{command} 没有成功提交，终端仍停在原输入框。"
+        if backend == "codex" and not await _finish_codex_new(pane):
+            return False, "/new 已提交，但 Codex 未能进入新会话输入框。"
     topic = projects.get_topic(cwd)
     if topic:
         from src import liveness
         liveness.note_abort(topic)  # 清掉本轮残留的卡片状态
     log.info("[clear] %s pane=%s backend=%s", Path(cwd).name, pane, backend)
     return True, command
+
+
+def _codex_new_location_prompt(screen: str) -> bool:
+    tail = "\n".join(screen.splitlines()[-20:])
+    return "Where should the new conversation run?" in tail and "Current checkout" in tail
+
+
+async def _finish_codex_new(pane: str, wait: float = 12.0) -> bool:
+    """Finish Codex's post-/new location picker and wait for the fresh input box."""
+    from src.abort import codex_input
+    deadline = time.time() + wait
+    accepted_location = False
+    while time.time() < deadline:
+        screen = await _capture_pane(pane)
+        if _codex_new_location_prompt(screen):
+            if not accepted_location:
+                # Codex defaults to Current checkout; automatic rotation must not create an unrequested worktree.
+                await backends.command("tmux", "send-keys", "-t", pane, "Enter")
+                accepted_location = True
+            await asyncio.sleep(0.5)
+            continue
+        tail = "\n".join(screen.splitlines()[-20:])
+        if "Ask Codex to do anything" in tail and not codex_input(screen):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):

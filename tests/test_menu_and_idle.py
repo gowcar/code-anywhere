@@ -30,6 +30,11 @@ class IdleDetectionTests(unittest.TestCase):
         self.assertEqual(agent_sessions.screen_state("❯ \n")[0], 'waiting_input')
         self.assertEqual(agent_sessions.screen_state("› Ask Codex to do anything\n")[0], 'waiting_input')
 
+    def test_codex_new_location_picker_is_confirmation(self):
+        screen = "Where should the new conversation run?\n› 1. Current checkout\n  2. New worktree"
+        self.assertEqual(agent_sessions.screen_state(screen), (
+            'waiting_confirmation', 'terminal is waiting for the new-conversation location choice'))
+
 
 class MenuTests(unittest.IsolatedAsyncioTestCase):
     def test_menu_open(self):
