@@ -157,6 +157,42 @@ class MonitorTests(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(len(self.bot.sent), 2)                    # 不加锁就会各发一张
 
+    def test_turn_finishing_while_card_is_resent_leaves_no_running_orphan(self):
+        class BlockingSendBot(FakeBot):
+            def __init__(self):
+                super().__init__()
+                self.send_started = asyncio.Event()
+                self.release_send = asyncio.Event()
+
+            async def send_message(self, **kw):
+                self.send_started.set()
+                await self.release_send.wait()
+                return await super().send_message(**kw)
+
+        async def scenario():
+            bot = BlockingSendBot()
+            mon = liveness.Monitor(bot, 42)
+            topic = liveness._topics.setdefault(7, liveness.Topic(7))
+            topic.turn_started, topic.state = 1000.0, "running"
+            topic.card_id, topic.card_posted, topic.card_activity = 55, 1000.0, 0
+            liveness._activity[7] = 1                              # 强制走“删旧卡→底部重发”
+
+            resend = asyncio.create_task(mon.update_card(topic, 1100.0, force=True))
+            await bot.send_started.wait()                          # 新卡发送请求已经在途
+            topic.state = "idle"
+            finish = asyncio.create_task(mon.on_change(topic, "running", 1101.0))
+            bot.release_send.set()
+            await asyncio.gather(resend, finish)
+            return bot, topic
+
+        bot, topic = asyncio.run(scenario())
+        self.assertEqual(len(bot.sent), 1)                         # 竞态确实走到了重发
+        self.assertEqual(bot.deleted, [55, 101])                  # 新发出的陈旧卡立即被清掉
+        self.assertIsNone(topic.card_id)
+        self.assertIsNone(topic.turn_started)
+        self.assertEqual(topic.state, "idle")
+        self.assertEqual(liveness.CARDS_FILE.read_text(), "{}")
+
     def test_stall_alert_once_with_buttons_and_recovery(self):
         self.at(0, snap(tokens="↓ 1k"))
         for t in range(10, 300, 10):

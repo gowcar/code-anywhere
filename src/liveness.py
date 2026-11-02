@@ -469,16 +469,21 @@ class Monitor:
             await self._edit(topic.alert_id, "✅ 已恢复进展" if topic.state != "idle" else "✅ 这一轮已结束")
             topic.alert_id = None
         if topic.state == "idle":
-            topic.turn_started = None
-            _last_tool.pop(topic.topic_id, None)
-            _active_tools.pop(topic.topic_id, None)
-            _tool_count.pop(topic.topic_id, None)
+            # update_card 可能正在“删旧卡→发新卡”的网络等待中。结束清理必须共用同一把锁，
+            # 否则旧卡删完后，那个在途任务仍会把切 idle 前生成的“运行中”文本重新发出来。
+            async with topic.lock:
+                if topic.state != "idle":  # 等锁期间已经开始下一轮，不能清掉新一轮状态
+                    return
+                topic.turn_started = None
+                _last_tool.pop(topic.topic_id, None)
+                _active_tools.pop(topic.topic_id, None)
+                _tool_count.pop(topic.topic_id, None)
+                card_id, topic.card_id = topic.card_id, None
+                _save_cards()
+                if card_id:  # 正常结束：回答本身已说明完成，卡片删掉
+                    await self._delete(card_id)
             for message_id in _user_msgs.pop(topic.topic_id, []):  # 这一轮做完：👀 → 👌
                 await react(self.bot, self.chat_id, message_id, "👌")
-            if topic.card_id:  # 正常结束：回答本身已说明完成，卡片删掉
-                await self._delete(topic.card_id)
-                topic.card_id = None
-                _save_cards()
 
     async def update_card(self, topic: Topic, now: float, force: bool = False):
         async with topic.lock:
@@ -505,13 +510,26 @@ class Monitor:
         topic.frame += 1
         text = card_text(topic, now)
         if move:
-            await self._delete(topic.card_id)  # 后面有了新消息：删掉旧卡，在底部重发
-            topic.card_id = None
+            old_card = topic.card_id
+            await self._delete(old_card)  # 后面有了新消息：删掉旧卡，在底部重发
+            if topic.card_id == old_card:
+                topic.card_id = None
+            # 删除请求等待期间可能已经收到回合结束；这时绝不能再发旧的“运行中”文本。
+            if topic.state == "idle" or not topic.turn_started:
+                _save_cards()
+                return
         if topic.card_id:  # 编辑时必须带上按钮，否则 TG 会把按钮清掉
             if not await self._edit(topic.card_id, text, markup=buttons(topic.topic_id)):
                 topic.card_id = None  # 卡片已不存在（被删或过旧）：下次重发
         else:
-            topic.card_id = await self._send(topic.topic_id, text, silent=True, markup=buttons(topic.topic_id))
+            new_card = await self._send(topic.topic_id, text, silent=True, markup=buttons(topic.topic_id))
+            # send_message 本身也会让出执行权；若期间切到 idle，立即删除刚发出的孤儿卡。
+            if topic.state == "idle" or not topic.turn_started:
+                if new_card:
+                    await self._delete(new_card)
+                _save_cards()
+                return
+            topic.card_id = new_card
             topic.card_posted = now
             topic.card_activity = _activity.get(topic.topic_id, 0)
             _save_cards()
