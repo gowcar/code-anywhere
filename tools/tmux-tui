@@ -23,6 +23,34 @@ FIELDS = ("session_id", "session_name", "session_windows", "session_created",
 KEYHINTS = (("↵", "attach"), ("n", "new"), ("r", "rename"), ("l", "label"),
             ("d", "kill"), ("/", "filter"), ("?", "help"), ("q", "quit"))
 
+# SSH clients may advertise a terminal such as xterm-ghostty or xterm-kitty
+# whose terminfo entry is not installed on the server.  curses otherwise raises
+# a raw traceback before the TUI can start.  Prefer the advertised terminal,
+# but gracefully fall back to a widely available compatible entry.
+TERM_FALLBACKS = ("xterm-256color", "screen-256color", "xterm")
+
+
+def ensure_terminfo():
+    original = os.environ.get("TERM", "")
+    try:
+        curses.setupterm(term=original or "unknown")
+        return original
+    except curses.error:
+        pass
+
+    for fallback in TERM_FALLBACKS:
+        if fallback == original:
+            continue
+        try:
+            curses.setupterm(term=fallback)
+        except curses.error:
+            continue
+        os.environ["TERM"] = fallback
+        return fallback
+
+    shown = original or "<empty>"
+    sys.exit("tmux-tui: no usable terminfo entry for TERM=%s" % shown)
+
 
 # ---------------------------------------------------------------- tmux plumbing
 
@@ -517,6 +545,7 @@ if __name__ == "__main__":
     locale.setlocale(locale.LC_ALL, "")
     if not sys.stdout.isatty():
         sys.exit("tmux-tui: needs a terminal")
+    ensure_terminfo()
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
