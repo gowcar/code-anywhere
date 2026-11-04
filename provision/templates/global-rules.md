@@ -38,7 +38,7 @@
   GitHub：`gh issue comment <N> -b "<会话名> 接手处理"`；`gh issue edit <N> --remove-label agent:todo --add-label agent:doing`
   GitLab：`glab issue note <N> -m "<会话名> 接手处理"`；`glab issue update <N> --unlabel agent:todo --label agent:doing`
   本地：`local-issue comment <N> -b "<会话名> 接手处理"`；`local-issue edit <N> --remove-label agent:todo --add-label agent:doing`
-- **读 issue**：`gh issue view <N> --comments` / `glab issue view <N> --comments` / `local-issue view <N> --comments`；**看截图用 `issue-images <仓库> <N>`**，它直接给出本机原图路径（所有会话在同一台机器上），本机没有原件时用共享浏览器打开链接。
+- **读 issue**：`gh issue view <N> --comments` / `glab issue view <N> --comments` / `local-issue view <N> --comments`；**看截图用 `issue-images <仓库> <N>`**，它直接给出本机原图路径（所有会话在同一台机器上）；本机没有原件时优先用平台 API、下载工具或普通 HTTP 获取，不要仅为看图启用共享浏览器。
 - **处理**：按项目原有纪律做（读 recon/PROGRESS、测试、发布授权边界不变）。issue 本身不构成发布、LIVE 写入或删除数据的授权。
 - **修完（等用户验证）**：推送分支；在 issue 里评论：改了什么、提交号与分支、**做不到或与原需求不同的部分**、用户怎么验证（装哪个版本 / 打开哪个页面）；评论里**必须有单独一行 `验证方法：<一句话写全前提和操作>`**，例如“验证方法：安装 iOS 0.2.67（需先删掉旧版重装），用正式账号登录，在 Chat 页点输入框后按住输入栏下拉”；需要重启、重新登录、清缓存、等部署等条件都写进这一行。TG 的 `/issues` 会把这一行显示给用户，条件变化（如发了新版本）就再发一条带新 `验证方法：` 行的评论，以最新一条为准。然后把 `agent:doing` 改成 `agent:to-verify`，并在 TG 用一句话告诉用户“#N 已修好待验证”。**不要自己关闭 issue**，提交信息里用 `Refs #N`，不要写 `Closes #N` / `Fixes #N`（会在合并时绕过用户验证自动关闭）。
 - **评论内容**：issue 对团队可见，评论里不要写服务器本地路径（`/home/...`、`/Users/...`）、令牌或会话 ID；需要附截图时用 `issue-upload <仓库> <文件>` 上传后贴它输出的 markdown。
@@ -54,9 +54,13 @@
 - 结束一段工作前用 `git status` 确认工作区干净、和远端同步；确实要暂存的半成品放到分支上并推送，并在 PROGRESS 记一行。
 - 不要替用户提交或改动其他机器、其他人工作区里的未提交内容；先报告，等用户决定。
 
-## 共享浏览器（code-anywhere 能力，2026-10-22 用户要求）
+## 共享浏览器（code-anywhere 能力，2026-11-04 用户要求）
 
-普通公开网页检索、事实查询和公开文档查阅，优先使用常规 Web Search/Web Fetch。只有需要登录态、页面交互、真实 UI/功能验证、表单、截图、下载、浏览器网络/控制台检查或用户接管时，才使用 code-anywhere 共享浏览器；确需浏览器时不要自己另外启动浏览器：
+共享浏览器是**最后手段**。只有任务确实需要在真实浏览器中执行操作，并且没有可用的 API、CLI、普通 HTTP、Web Search/Web Fetch 或其他非浏览器工具时，才允许使用。调用前先确认这些替代方式不可行。
+
+以下场景**不要使用**共享浏览器：查资料、事实查询、阅读网页或文档、单纯看页面/界面/布局、查看截图、做视觉检查。此类任务应使用 Web Search/Web Fetch、平台 API/CLI、代码与本地文件，或用户提供的截图。
+
+可使用的典型场景仅限：必须依赖登录态且只能在网页中完成的写操作/表单提交；没有 API 的真实交互功能验证；为完成已授权操作而必须进行的登录、验证码或用户接管。确需浏览器时不要自己另外启动浏览器：
 
 - 用 **browser MCP**（官方 Playwright MCP 的全部工具）。第一次调用时自动分到一个独占槽位，空闲 10 分钟后自动归还，下次调用自动重连。
 - 所有项目共用一个登录身份：先打开页面看看是否已经登录，再决定要不要请用户登录。

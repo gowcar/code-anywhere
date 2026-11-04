@@ -30,6 +30,17 @@ class MergeBlockTests(unittest.TestCase):
         self.assertEqual(merged.count("一句话 + md"), 1)
         self.assertIn(setup.BEGIN, merged)
 
+    def test_shared_browser_policy_is_last_resort(self):
+        rules = (setup.TEMPLATES / "global-rules.md").read_text()
+        skill = (setup.TEMPLATES / "skills" / "shared-browser" / "SKILL.md").read_text()
+        for text in (rules, skill):
+            self.assertIn("最后手段", text)
+            self.assertIn("API", text)
+            self.assertIn("CLI", text)
+            self.assertIn("看页面/界面/布局", text)
+        self.assertIn("不要仅为看图启用共享浏览器", rules)
+        self.assertIn("“打开看看”“看一下界面”不构成使用条件", skill)
+
 
 class EnvTests(unittest.TestCase):
     def test_update_in_place_including_commented_key(self):
