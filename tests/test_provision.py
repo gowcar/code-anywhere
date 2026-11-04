@@ -41,6 +41,14 @@ class MergeBlockTests(unittest.TestCase):
         self.assertIn("不要仅为看图启用共享浏览器", rules)
         self.assertIn("“打开看看”“看一下界面”不构成使用条件", skill)
 
+    def test_repo_hygiene_policy_requires_clean_pushed_worktrees(self):
+        rules = (setup.TEMPLATES / "global-rules.md").read_text()
+        self.assertIn("开工先运行 `git status --short --branch`", rules)
+        self.assertIn("立即做单一职责提交并推送", rules)
+        self.assertIn("不要未经核对使用 `git add -A`、`git add .`", rules)
+        self.assertIn("自己的工作区干净且分支已推送并与远端同步", rules)
+        self.assertIn("不要靠长期 stash 或未跟踪文件保存", rules)
+
 
 class EnvTests(unittest.TestCase):
     def test_update_in_place_including_commented_key(self):
