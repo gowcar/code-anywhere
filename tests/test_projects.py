@@ -115,6 +115,19 @@ class DiscoverTests(unittest.TestCase):
         self.assertIn("alpha", names)
         self.assertNotIn("inner", names)
 
+    def test_ignores_tmp_root_reached_through_symlink(self):
+        # macOS：/tmp -> /private/tmp，发现到的路径是 resolve 后的 /private/tmp/...
+        real = self.root / "private-tmp"
+        (real / "u").mkdir(parents=True)
+        link = self.root / "tmp-link"
+        link.symlink_to(real)
+        write_claude_project(self.claude, str(real / "u"))
+        write_rollout(self.codex_home / "sessions", "a1", str(self.proj_a))
+        with patch.object(projects, "_TMP_ROOTS", (str(link),)):
+            names = self.names()
+        self.assertIn("alpha", names)
+        self.assertNotIn("u", names)
+
     def test_projectignore_file(self):
         write_rollout(self.codex_home / "sessions", "a1", str(self.proj_a))
         write_rollout(self.codex_home / "sessions", "b1", str(self.proj_b))

@@ -181,9 +181,10 @@ def _is_ignored(path: str) -> bool:
     if p == Path.home():
         return True
     for tmp in _TMP_ROOTS:
-        tmp_path = Path(tmp)
-        if p == tmp_path or p.is_relative_to(tmp_path):
-            return True
+        # macOS 的 /tmp 是 /private/tmp 的软链，而发现阶段的路径已 resolve：两种写法都要认
+        for tmp_path in {Path(tmp), Path(tmp).resolve()}:
+            if p == tmp_path or p.is_relative_to(tmp_path):
+                return True
     ignore_file = PROJECT_ROOT / ".projectignore"
     if ignore_file.exists():
         try:
