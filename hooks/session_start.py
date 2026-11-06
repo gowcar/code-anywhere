@@ -23,6 +23,14 @@ _self_dir = str(pathlib.Path(__file__).parent.parent.resolve())
 if os.environ.get("CODE_ANYWHERE_SKIP"):
     sys.exit(0)
 
+# 别的程序在后台调用的无界面 claude（claude -p / SDK，entrypoint=sdk-*）不是用户的终端会话：
+# 不打 pane 标签、不通知 Bot，否则会把宿主终端改绑到临时目录并自动建出多余话题。
+# Bot 自己拉起的会话带 CODE_ANYWHERE_BOT_SESSION（旧进程只有 TELEGRAM_CHAT_ID），照常处理。
+_entrypoint = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+_bot_spawned = os.environ.get("CODE_ANYWHERE_BOT_SESSION") or os.environ.get("TELEGRAM_CHAT_ID")
+if _entrypoint.startswith("sdk") and not _bot_spawned:
+    sys.exit(0)
+
 # 给当前 tmux pane 打项目标签 — 注入时可实时反查，免去存 pane id
 _tmux_pane = os.environ.get("TMUX_PANE", "")
 if _tmux_pane and _cwd:

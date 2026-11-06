@@ -51,6 +51,7 @@ async def spawn_claude(session: Session, resume_id: str | None = None) -> None:
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
     env.pop("TMUX_PANE", None)              # 防止 hook 误认为终端会话
+    env["CODE_ANYWHERE_BOT_SESSION"] = "1"  # SessionStart hook 据此区分 Bot 会话与外部无界面 claude
     # 让 permission hook 识别为 Bot 会话 → 推 TG 审批按钮
     if session.chat_id:
         env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
