@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -27,6 +28,25 @@ ATTACHMENTS_KEEP = 20                # .attachments 保留最近 N 个附件
 RECON_DIR = "recon"
 
 
+def _home_dirs() -> set[Path]:
+    """Both $HOME and the account home (they differ when HOME is overridden)."""
+    homes: set[Path] = set()
+    candidates = [os.environ.get("HOME", "")]
+    try:
+        import pwd
+        candidates.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, OSError):
+        pass
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            homes.add(Path(raw).expanduser().resolve())
+        except OSError:
+            continue
+    return homes
+
+
 def resolve_project_root(cwd: str) -> Path:
     """Resolve a session cwd to the project root used by recon.
 
@@ -34,6 +54,9 @@ def resolve_project_root(cwd: str) -> Path:
     preserves nested projects with their own external brain.  For a new
     project, fall back to the Git worktree root; only non-Git directories use
     cwd itself.
+
+    Home directories are never inherited as an ancestor: a recon/ in ~ belongs
+    to the project living in ~ itself, not to every project created under it.
     """
     root = Path(cwd).expanduser()
     try:
@@ -44,7 +67,10 @@ def resolve_project_root(cwd: str) -> Path:
     if not root.is_dir():
         return root
 
+    homes = _home_dirs()
     for candidate in (root, *root.parents):
+        if candidate != root and candidate in homes:
+            continue
         if (candidate / RECON_DIR / "PROGRESS.md").is_file():
             return candidate
 

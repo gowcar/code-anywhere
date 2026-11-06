@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src import recon
 
@@ -51,6 +52,22 @@ class ReconRootTests(unittest.TestCase):
         self.assertTrue((self.root / "CLAUDE.md").exists())
         self.assertFalse((self.child / "recon").exists())
         self.assertFalse((self.child / "CLAUDE.md").exists())
+
+    def test_recon_in_home_is_not_inherited_by_projects_below_it(self):
+        home = Path(self.tmp.name)
+        progress = home / "recon" / "PROGRESS.md"
+        progress.parent.mkdir()
+        progress.write_text("# PROGRESS\n\n## 📍 当前位置\nhome 项目的进度。\n", encoding="utf-8")
+
+        with mock.patch.object(recon, "_home_dirs", return_value={home.resolve()}):
+            created = recon.ensure_skeleton(str(self.child))
+            context = recon.build_session_context(str(self.child))
+            home_root = recon.resolve_project_root(str(home))
+
+        self.assertTrue(created)
+        self.assertTrue((self.child / "recon" / "PROGRESS.md").exists())
+        self.assertNotIn("home 项目的进度。", context or "")
+        self.assertEqual(home_root, home.resolve())
 
 
 if __name__ == "__main__":
