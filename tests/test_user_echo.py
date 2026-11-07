@@ -37,6 +37,29 @@ class UserEchoTests(unittest.TestCase):
             self.assertEqual(''.join(c[2:] for c in split_user_message(text)), text)
 
 
+class PastedContentTests(unittest.TestCase):
+    WRAPPED = '\n\n<pasted_content id="2257">\n[引用消息]\n✦ 旧回复\n[/引用消息]\n\n新的要求\n</pasted_content id="2257">\n'
+
+    def setUp(self):
+        api_server._pending_tg_inputs.clear()
+        self.addCleanup(api_server._pending_tg_inputs.clear)
+
+    def test_wrapped_paste_matches_message_sent_from_tg(self):
+        api_server.mark_tg_input(7, '[引用消息]\n✦ 旧回复\n[/引用消息]\n\n新的要求')
+        self.assertTrue(api_server._consume_tg_input(7, self.WRAPPED))
+        self.assertNotIn(7, api_server._pending_tg_inputs)
+
+    def test_unwrap_strips_only_paste_tags(self):
+        self.assertEqual(api_server.unwrap_pasted(self.WRAPPED), '[引用消息]\n✦ 旧回复\n[/引用消息]\n\n新的要求')
+        self.assertEqual(api_server.unwrap_pasted(' 普通 <tag> 消息 '), ' 普通 <tag> 消息 ')
+        self.assertEqual(api_server.unwrap_pasted('<pasted_content>abc</pasted_content>'), 'abc')
+
+    def test_unrelated_text_is_not_consumed(self):
+        api_server.mark_tg_input(7, 'from TG')
+        self.assertFalse(api_server._consume_tg_input(7, '<pasted_content id="1">other</pasted_content id="1">'))
+        self.assertEqual(api_server._pending_tg_inputs[7], ['from TG'])
+
+
 class WatcherUserEchoTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_ordered_echo_dedup_and_tg_source_suppression(self):
         text = '<tag>&😀\n' * 1600 + '尾部完整'

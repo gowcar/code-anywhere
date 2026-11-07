@@ -53,13 +53,27 @@ def mark_tg_input(topic_id: int, text: str) -> None:
     _pending_tg_inputs.setdefault(topic_id, []).append(text)
 
 
+# Claude Code 新版把粘贴进来的文本（TG 多行消息走 tmux bracketed paste）在记录里包成
+# <pasted_content id="…">…</pasted_content id="…">：比对去重和回显前先还原成原文
+_PASTE_TAG_RE = re.compile(r'</?pasted_content(?:\s+id="[^"]*")?\s*>')
+
+
+def unwrap_pasted(text: str) -> str:
+    if "pasted_content" not in text:
+        return text
+    return _PASTE_TAG_RE.sub("", text).strip()
+
+
 def _consume_tg_input(topic_id: int, text: str) -> bool:
     q = _pending_tg_inputs.get(topic_id)
     if not q:
         return False
-    try:
-        q.remove(text)
-    except ValueError:
+    wanted = unwrap_pasted(text).strip()
+    for i, pending in enumerate(q):
+        if pending == text or unwrap_pasted(pending).strip() == wanted:
+            del q[i]
+            break
+    else:
         return False
     if not q:
         _pending_tg_inputs.pop(topic_id, None)
@@ -940,6 +954,7 @@ async def _watch_transcript(session_id: str, path: str, topic_id: int, chat_id: 
                                 if c.get("type") == "text":
                                     text = c["text"]
                                     break
+                        text = unwrap_pasted(text)
                         if text.strip():
                             # 只 echo 真人消息（origin.kind == 'human'）。
                             # compact 摘要(isCompactSummary)、harness 注入([Your previous
