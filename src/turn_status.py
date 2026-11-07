@@ -35,11 +35,15 @@ def save(sid, value):
 def safe_error(error):
     # Never forward arbitrary gateway error text: it can include URLs or credentials.
     text = json.dumps(error, ensure_ascii=False).lower()
+    if "fast mode isn't available" in text or 'fast mode is not available' in text:
+        return {'code': 'service_tier', 'reason': '当前模型不支持 Fast 模式，请切回 Standard'}
     if any(s in text for s in ('server_overloaded', 'at capacity', 'overloaded')):
         return {'code': 'capacity', 'reason': '模型服务当前容量不足'}
-    if any(s in text for s in ('invalid_api_key', 'unauthorized', 'authentication', '401')):
+    if (any(s in text for s in ('invalid_api_key', 'unauthorized', 'authentication'))
+            or any(s in text for s in ('status 401', 'status": 401', 'http 401', '401 unauthorized'))):
         return {'code': 'authentication', 'reason': '模型服务认证失败'}
-    if any(s in text for s in ('rate_limit', 'rate limit', '429')):
+    if (any(s in text for s in ('rate_limit', 'rate limit'))
+            or any(s in text for s in ('status 429', 'status": 429', 'http 429', '429 too many'))):
         return {'code': 'rate_limit', 'reason': '模型服务请求限流'}
     if any(s in text for s in ('context_length', 'context window', 'context limit')):
         return {'code': 'context_limit', 'reason': '模型上下文超出限制'}

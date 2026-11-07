@@ -36,6 +36,22 @@ class TurnStatusTests(unittest.IsolatedAsyncioTestCase):
                       'timeout secret', {'codex_error_info': 'rate_limit'}]:
             self.assertNotIn('secret', json.dumps(state.safe_error(error)))
 
+    def test_fast_mode_error_is_not_misclassified_by_digits_in_ray_id(self):
+        error = {'message': "unexpected status 403 Forbidden: Fast mode isn't available for the selected model "
+                            'in your workspace., cf-ray: a5693401989a80fb-NRT'}
+        self.assertEqual(state.safe_error(error), {
+            'code': 'service_tier',
+            'reason': '当前模型不支持 Fast 模式，请切回 Standard',
+        })
+        self.assertEqual(state.safe_error({'message': 'unexpected status 401 Unauthorized'}), {
+            'code': 'authentication',
+            'reason': '模型服务认证失败',
+        })
+        self.assertEqual(state.safe_error({'message': 'request id abc-429-def'}), {
+            'code': 'model_error',
+            'reason': '模型调用失败，详细原因请查看终端',
+        })
+
     async def test_error_then_completion_notified_once_persistently(self):
         state.observe('s', event('task_started'))
         state.observe('s', event('error', second=2, will_retry=False, message=ERROR['message']))
