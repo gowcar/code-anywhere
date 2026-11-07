@@ -18,6 +18,7 @@ import secrets
 import shlex
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import aiohttp
@@ -462,6 +463,94 @@ async def _tab_limit_refusal(slot: int, raw: str) -> str | None:
     return json.dumps(reply, ensure_ascii=False)
 
 
+class _TakeoverCdpRouter:
+    """人工接管时冻结普通 CDP 命令，但让新 target 完成 Playwright 启动握手。
+
+    Playwright 会用 waitForDebuggerOnStart 自动接管新弹窗。若连
+    Runtime.runIfWaitingForDebugger 也被 gate 挡住，用户打开的 SSO 弹窗会永远停在
+    about:blank。普通命令不能直接 await gate（会堵住同一 WebSocket 后续的启动命令），
+    所以先排队，gate 恢复后再按序补发。
+    """
+
+    def __init__(self, slot: int, upstream):
+        self.slot = slot
+        self.upstream = upstream
+        self.bootstrap_sessions: set[str] = set()
+        self.deferred: deque[str] = deque()
+        self.deferred_ready = asyncio.Event()
+        self.idle = asyncio.Event()
+        self.idle.set()
+        self.send_lock = asyncio.Lock()
+
+    @staticmethod
+    def _message(raw: str) -> dict:
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def observe_browser(self, raw: str) -> None:
+        message = self._message(raw)
+        params = message.get("params") or {}
+        method = message.get("method")
+        if method == "Target.attachedToTarget" and params.get("waitingForDebugger") is True:
+            session = params.get("sessionId")
+            if session:
+                self.bootstrap_sessions.add(session)
+        elif method == "Target.detachedFromTarget":
+            self.bootstrap_sessions.discard(params.get("sessionId"))
+
+    def _defer(self, raw: str) -> None:
+        self.deferred.append(raw)
+        self.idle.clear()
+        self.deferred_ready.set()
+
+    async def _send(self, raw: str, message: dict) -> None:
+        await self.upstream.send_str(raw)
+        if (message.get("sessionId") in self.bootstrap_sessions
+                and message.get("method") == "Runtime.runIfWaitingForDebugger"):
+            self.bootstrap_sessions.discard(message["sessionId"])
+
+    async def _flush_locked(self) -> None:
+        while self.deferred and gate(self.slot).is_set():
+            raw = self.deferred.popleft()
+            await self._send(raw, self._message(raw))
+            _last_used[self.slot] = time.time()
+        if not self.deferred:
+            self.deferred_ready.clear()
+            self.idle.set()
+
+    async def forward(self, raw: str) -> None:
+        message = self._message(raw)
+        bootstrap = message.get("sessionId") in self.bootstrap_sessions
+        if not bootstrap and not gate(self.slot).is_set():
+            self._defer(raw)
+            return
+        async with self.send_lock:
+            # gate 可能在等待 send_lock 时刚被清空，必须在锁内再检查一次。
+            if not bootstrap:
+                if not gate(self.slot).is_set():
+                    self._defer(raw)
+                    return
+                await self._flush_locked()
+                if not gate(self.slot).is_set():
+                    self._defer(raw)
+                    return
+            await self._send(raw, message)
+            _last_used[self.slot] = time.time()
+
+    async def flush_deferred(self) -> None:
+        while True:
+            await self.deferred_ready.wait()
+            await gate(self.slot).wait()
+            async with self.send_lock:
+                await self._flush_locked()
+
+    async def wait_idle(self) -> None:
+        await self.idle.wait()
+
+
 async def handle_version(request: web.Request) -> web.Response:
     client = request.match_info["client"]
     try:
@@ -489,6 +578,8 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     try:
         async with aiohttp.ClientSession(trust_env=False) as http:
             async with http.ws_connect(f"ws://127.0.0.1:{cdp_port(slot)}{path}", max_msg_size=0) as upstream:
+                router = _TakeoverCdpRouter(slot, upstream)
+
                 async def to_browser():
                     async for msg in downstream:
                         if msg.type != aiohttp.WSMsgType.TEXT:
@@ -497,17 +588,17 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                         if refusal:
                             await downstream.send_str(refusal)
                             continue
-                        await gate(slot).wait()   # 人工接管期间暂停模型操作
-                        _last_used[slot] = time.time()
-                        await upstream.send_str(msg.data)
+                        await router.forward(msg.data)
 
                 async def to_client():
                     async for msg in upstream:
                         if msg.type != aiohttp.WSMsgType.TEXT:
                             break
+                        router.observe_browser(msg.data)
                         await downstream.send_str(msg.data)
 
-                tasks = [asyncio.create_task(to_browser()), asyncio.create_task(to_client())]
+                tasks = [asyncio.create_task(to_browser()), asyncio.create_task(to_client()),
+                         asyncio.create_task(router.flush_deferred())]
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in tasks:
                     task.cancel()

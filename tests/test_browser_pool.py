@@ -1,4 +1,5 @@
 """共享浏览器池：租用互斥、归还、接管前置条件、中转机脚本保存与恢复原服务。"""
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -46,13 +47,55 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "not_leased")
 
     async def test_new_tab_refused_at_limit(self):
-        create = '{"id": 7, "method": "Target.createTarget", "params": {"url": "about:blank"}}'
+        create = ('{"id": 7, "sessionId": "popup-1", "method": "Target.createTarget", '
+                  '"params": {"url": "about:blank"}}')
         with patch.object(pool, "_pages", AsyncMock(return_value=pool.MAX_TABS)):
             refusal = await pool._tab_limit_refusal(1, create)
             self.assertIn("最多", refusal)
+            self.assertIn('"sessionId": "popup-1"', refusal)
             self.assertIsNone(await pool._tab_limit_refusal(1, '{"id": 8, "method": "Page.navigate"}'))
         with patch.object(pool, "_pages", AsyncMock(return_value=1)):
             self.assertIsNone(await pool._tab_limit_refusal(1, create))
+
+    async def test_takeover_allows_popup_bootstrap_without_releasing_model_commands(self):
+        class Upstream:
+            def __init__(self):
+                self.sent = []
+
+            async def send_str(self, raw):
+                self.sent.append(raw)
+
+        upstream = Upstream()
+        router = pool._TakeoverCdpRouter(1, upstream)
+        pool.gate(1).clear()
+        flush_task = asyncio.create_task(router.flush_deferred())
+        self.addAsyncCleanup(self._cancel_task, flush_task)
+
+        navigate = '{"id":1,"method":"Page.navigate","params":{"url":"https://example.com"}}'
+        await router.forward(navigate)
+        self.assertEqual(upstream.sent, [])
+
+        router.observe_browser('{"method":"Target.attachedToTarget","params":'
+                               '{"sessionId":"popup-1","waitingForDebugger":true}}')
+        initialize = '{"id":2,"sessionId":"popup-1","method":"Runtime.enable"}'
+        resume = '{"id":3,"sessionId":"popup-1","method":"Runtime.runIfWaitingForDebugger"}'
+        await router.forward(initialize)
+        await router.forward(resume)
+        self.assertEqual(upstream.sent, [initialize, resume])
+        self.assertNotIn("popup-1", router.bootstrap_sessions)
+
+        after_resume = '{"id":4,"sessionId":"popup-1","method":"Runtime.evaluate"}'
+        await router.forward(after_resume)
+        self.assertEqual(upstream.sent, [initialize, resume])
+
+        pool.gate(1).set()
+        await asyncio.wait_for(router.wait_idle(), 1)
+        self.assertEqual(upstream.sent, [initialize, resume, navigate, after_resume])
+
+    async def _cancel_task(self, task):
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
 
     def test_slot_count_has_hard_cap(self):
         self.assertLessEqual(pool.SLOTS, pool.MAX_SLOTS)
