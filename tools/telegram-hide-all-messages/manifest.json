@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Hide Telegram All Messages",
+  "version": "1.0.0",
+  "description": "Hide the All Messages row in Telegram Web while keeping every topic available.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://web.telegram.org/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
