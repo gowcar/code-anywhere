@@ -126,6 +126,23 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
         relay.assert_not_awaited()
         pool.gate(1).set()
 
+    async def test_monitor_skips_relay_cleanup_without_relay_host(self):
+        """公共隧道模式没配中转机：启动清理不能去 ssh 一个空主机名（会误报 Host key verification failed）"""
+        with patch.object(pool, "view_mode", return_value="public"), \
+             patch.object(pool, "_relay", AsyncMock()) as relay, \
+             patch.object(pool.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await pool.monitor()
+        relay.assert_not_awaited()
+
+    async def test_monitor_cleans_relay_on_start_in_relay_mode(self):
+        with patch.object(pool, "view_mode", return_value="relay"), \
+             patch.object(pool, "_relay", AsyncMock()) as relay, \
+             patch.object(pool.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await pool.monitor()
+        relay.assert_awaited_once_with("stop")
+
     def test_view_mode_defaults_to_cloudflare_without_config(self):
         with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_PUBLIC_URL", ""), \
              patch.object(pool, "_cloudflared", return_value="/bin/cloudflared"), \
