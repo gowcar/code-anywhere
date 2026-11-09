@@ -414,7 +414,7 @@ def _schedule_release(slot: int, client: str) -> None:
 
 async def monitor() -> None:
     """空闲回收：没人租用超过 IDLE_STOP 的槽位停掉；接管超时收尾。"""
-    if help_available():  # 桥接重启会丢掉接管状态：中转机上残留的临时 noVNC 先停掉，原服务恢复
+    if view_mode() == "relay":  # 桥接重启会丢掉接管状态：中转机上残留的临时 noVNC 先停掉，原服务恢复（没配中转机就不碰 ssh）
         try:
             await _relay("stop")
         except Exception:
