@@ -1688,6 +1688,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, al
     # 查找工作目录
     cwd = projects.get_path(session_key) if not is_private else state.get_cwd(session_key)
     if not cwd:
+        if topic_id in _implicit_threads:   # 自动建的 Thread：已经提示过、马上会删，不再重复回复
+            return
         await message.reply_text("此话题未绑定项目。请用 /projects 添加。")
         return
 
@@ -2011,6 +2013,49 @@ async def sync_all_projects(bot, chat_id: int):
             log.warning(f"[sync] {p['name']} 创建话题失败: {e}")
 
 
+# 私聊 Thread 模式下在 All Messages 里直接发消息，Telegram 会用消息开头自动建一个 Thread（is_name_implicit）。
+# 它不对应任何项目，消息也不会转给会话：提示一下，稍后自动删掉，免得 Thread 列表越来越乱（2026-11-10 用户要求）
+IMPLICIT_THREAD_TTL = 20
+_implicit_threads: set[int] = set()
+
+
+async def _on_topic_created(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    created = message.forum_topic_created if message else None
+    if not created or not created.is_name_implicit or message.chat.type != "private" or not _private_thread_mode():
+        return
+    if not update.effective_user or not auth_check(update.effective_user.id):
+        return
+    tid = message.message_thread_id
+    if not tid or projects.get_path(tid):
+        return
+    _implicit_threads.add(tid)
+    log.info("[thread] All Messages 自动建了未绑定 Thread %s「%s」，%ss 后删除", tid, created.name, IMPLICIT_THREAD_TTL)
+    with contextlib.suppress(Exception):
+        await context.bot.send_message(
+            chat_id=message.chat_id, message_thread_id=tid, disable_notification=True,
+            text=(f"⚠️ 这条没有转给任何会话：「{created.name}」\n"
+                  "在 All Messages 里直接发消息，Telegram 会自动新建一个这样的 Thread，它不对应任何项目。"
+                  f"请到对应项目的 Thread 里重发（新项目用 /new 名字）。这个 Thread {IMPLICIT_THREAD_TTL} 秒后自动删除。"))
+    context.application.create_task(_delete_implicit_thread(context.bot, message.chat_id, tid), update=update)
+
+
+async def _delete_implicit_thread(bot, chat_id: int, tid: int) -> None:
+    try:
+        await asyncio.sleep(IMPLICIT_THREAD_TTL)
+        if projects.get_path(tid):   # 这期间被绑定了项目：保留
+            return
+        await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=tid)
+        log.info("[thread] 已删除未绑定 Thread %s", tid)
+    except Exception as exc:
+        log.warning("[thread] 删除未绑定 Thread %s 失败: %s", tid, exc)
+        with contextlib.suppress(Exception):
+            await bot.send_message(chat_id=chat_id, message_thread_id=tid, disable_notification=True,
+                                   text="自动删除失败，请长按这个 Thread 手动删除。")
+    finally:
+        _implicit_threads.discard(tid)
+
+
 async def _drop_own_topic_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """状态符号改话题名时 TG 会插一条“修改了话题名称”的系统消息，删掉免得刷屏。"""
     message = update.effective_message
@@ -2107,6 +2152,7 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_EDITED, _drop_own_topic_edit))
+    app.add_handler(MessageHandler(filters.StatusUpdate.FORUM_TOPIC_CREATED & filters.ChatType.PRIVATE, _on_topic_created))
     # 文本消息
     app.add_handler(
         MessageHandler(
