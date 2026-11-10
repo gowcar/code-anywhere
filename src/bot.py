@@ -1,6 +1,7 @@
 """Telegram Bot — 命令路由 + 消息处理"""
 
 import asyncio
+import contextlib
 import hashlib
 import html as html_lib
 import json
@@ -96,38 +97,81 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ /model ============
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/model 查看 · /model list · /model [claude|codex] [模型] [effort] [权限]（顺序不限，未写的不变）"""
+    """/model 按钮菜单 · /model list · /model [claude|codex] [模型] [effort] [权限]（顺序不限，未写的不变）"""
     if not auth_check(update.effective_user.id):
         return
     cwd = _update_cwd(update)
     if not cwd:
         await update.message.reply_text("请在已绑定的项目话题内使用 /model")
         return
-    from src import model_prefs, permissions
+    from src import model_prefs
     args = context.args or []
     topic_id = update.message.message_thread_id or update.message.chat_id
+    catalog = await asyncio.to_thread(model_prefs.codex_models)
     if args and args[0].lower() in {"list", "ls", "列表"}:
-        catalog = await asyncio.to_thread(model_prefs.codex_models)
         await update.message.reply_text(model_prefs.format_list(catalog), parse_mode="HTML")
         return
     if not args:
-        await update.message.reply_text(_model_status(cwd), parse_mode="HTML")
+        text, markup = _model_menu(cwd, catalog)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        return
+    try:
+        req = model_prefs.parse(args, backends.get_backend(cwd), catalog)
+    except ValueError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+
+    async def progress(text: str) -> None:
+        await update.message.reply_text(text)
+
+    note = await _apply_model(cwd, topic_id, req, catalog, progress)
+    text, markup = _model_menu(cwd, catalog, note)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def _model_callback(query, update: Update, data: str) -> None:
+    """/model 菜单按钮：点了立即切换，菜单原地刷新"""
+    from src import model_menu, model_prefs
+    cwd = _update_cwd(update)
+    if not cwd:
+        await query.answer("这个 Thread 已经没有绑定项目了", show_alert=True)
         return
     catalog = await asyncio.to_thread(model_prefs.codex_models)
+    try:
+        req = model_menu.parse_callback(data, _model_current(cwd, catalog), catalog)
+    except ValueError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    if req is None:
+        await query.answer("已是当前设置" if data != model_menu.PREFIX + "n" else "")
+        return
+    await query.answer("正在切换…")
+    topic_id = query.message.message_thread_id or query.message.chat_id
+
+    async def progress(text: str) -> None:
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(f"⏳ {text}")
+
+    note = await _apply_model(cwd, topic_id, req, catalog, progress)
+    text, markup = _model_menu(cwd, catalog, note)
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception:   # 消息太旧或已被删：另发一份
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def _apply_model(cwd: str, topic_id: int, req, catalog: list[dict], progress) -> str:
+    """把 /model 请求落到偏好并重启终端；返回给用户看的结果说明（失败也写在说明里）。"""
+    from src import model_prefs, permissions
     async with _project_locks.setdefault(cwd, asyncio.Lock()):
         current = backends.get_backend(cwd)
-        try:
-            req = model_prefs.parse(args, current, catalog)
-            target = req.engine or current
-            if target == "codex" and req.effort and not req.model:
-                # 没指定模型时，按项目将使用的模型校验 effort
-                slug = model_prefs.get(cwd, "codex").get("model") or _running_model(cwd, "codex")
-                efforts = next((m["efforts"] for m in catalog if m["slug"] == slug), None)
-                if efforts and req.effort not in efforts:
-                    raise ValueError(f"{slug} 不支持 effort「{req.effort}」，可选：{' / '.join(efforts)}")
-        except ValueError as exc:
-            await update.message.reply_text(f"⚠️ {exc}")
-            return
+        target = req.engine or current
+        if target == "codex" and req.effort and not req.model:
+            # 没指定模型时，按项目将使用的模型校验 effort
+            slug = model_prefs.get(cwd, "codex").get("model") or _running_model(cwd, "codex")
+            efforts = next((m["efforts"] for m in catalog if m["slug"] == slug), None)
+            if efforts and req.effort not in efforts:
+                return f"⚠️ {slug} 不支持 effort「{req.effort}」，可选：{' / '.join(efforts)}"
         if target != current:
             old_pane = await _find_pane_for_project(cwd)
             if old_pane:
@@ -136,29 +180,27 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from src.api_server import retire_project_watchers
             retire_project_watchers(cwd, target)
             stop_typing(topic_id)
-        changed = any((req.model, req.effort, req.permission))
+        changed = any(v is not None for v in (req.model, req.effort, req.permission))
         if target == "codex":
             model_prefs.update(cwd, "codex", model=req.model, effort=req.effort)
             if req.permission:
                 permissions.set_mode(cwd, req.permission)
         else:
             model_prefs.update(cwd, "claude", model=req.model, effort=req.effort, permission=req.permission)
-        note = ""
         pane = await _find_pane_for_project(cwd)
         if changed and pane:
-            await update.message.reply_text("正在按新设置重启终端，当前回合会中断，随后接回原会话…")
+            await progress("正在按新设置重启终端，当前回合会中断，随后接回原会话…")
             try:
                 from src import model_switch
-                note = await model_switch.restart(cwd, topic_id)
+                return await model_switch.restart(cwd, topic_id)
             except Exception as exc:
                 log.exception("[model] restart failed project=%s", cwd)
-                note = f"⚠️ 设置已保存，但重启未完成：{exc}"
-        elif pane:
+                return f"⚠️ 设置已保存，但重启未完成：{exc}"
+        if pane:
             from src.api_server import register_pane_watcher
             await register_pane_watcher(pane, cwd)
-        else:
-            note = "下一条消息启动终端时生效。"
-    await update.message.reply_text(_model_status(cwd) + (f"\n\n{note}" if note else ""), parse_mode="HTML")
+            return ""
+        return "下一条消息启动终端时生效。"
 
 
 def _running_model(cwd: str, engine: str) -> str:
@@ -167,25 +209,28 @@ def _running_model(cwd: str, engine: str) -> str:
                  if v.get("cwd") == cwd and v.get("backend", "claude") == engine), "")
 
 
-def _model_status(cwd: str) -> str:
-    from src import model_prefs, permissions
+def _model_current(cwd: str, catalog: list[dict]):
+    """项目当前（或下次启动将用）的引擎、模型、effort、权限"""
+    from src import model_menu, model_prefs, permissions
     engine = backends.get_backend(cwd)
     prefs = model_prefs.get(cwd, engine)
-    if engine == "codex":
-        model = prefs.get("model") or _running_model(cwd, "codex") or os.getenv("CODEX_MODEL") or "Codex 配置默认"
-        perm = permissions.LABELS[permissions.get_mode(cwd)]
+    running = _running_model(cwd, engine)
+    if engine == "claude":
+        running = model_prefs._claude_model(running) or running if running else ""
+        perm = prefs.get("permission") or backends._claude_settings_permission(cwd) or "default"
+        perm = perm if perm in model_prefs.CLAUDE_PERMISSIONS else "default"
     else:
-        model = next((n for _, mid, n in model_prefs.CLAUDE_MODELS if mid == prefs.get("model")), None) \
-            or prefs.get("model") or _running_model(cwd, "claude") or "Claude 配置默认"
-        perm_key = prefs.get("permission") or backends._claude_settings_permission(cwd) or "default"
-        perm = model_prefs.CLAUDE_PERMISSIONS[perm_key]
-    return (f"<b>{html_lib.escape(Path(cwd).name)}</b>\n"
-            f"引擎：{'Codex' if engine == 'codex' else 'Claude'}\n"
-            f"模型：{html_lib.escape(model)}\n"
-            f"effort：{prefs.get('effort') or '默认'}\n"
-            f"权限：{perm}\n\n"
-            "切换示例：<code>/model claude sonnet high</code>　<code>/model gpt-6-sol xhigh full</code>\n"
-            "全部选项：<code>/model list</code>")
+        perm = permissions.get_mode(cwd)
+    model = prefs.get("model") or running or model_prefs.default_model(engine)
+    effort = prefs.get("effort") or None
+    fallback = None if effort else model_prefs.default_effort(engine, model, catalog)
+    return model_menu.Current(engine=engine, model=model, effort=effort or fallback,
+                              effort_is_default=not effort and bool(fallback), permission=perm)
+
+
+def _model_menu(cwd: str, catalog: list[dict], note: str = ""):
+    from src import model_menu
+    return model_menu.render(Path(cwd).name, _model_current(cwd, catalog), catalog, html_lib.escape(note))
 
 
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", str(Path.home() / "workspace"))).expanduser()
@@ -728,6 +773,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("is:"):  # /issues 按钮：验证通过 / 不通过 / 放弃 / 刷新
         await _issues_callback(query, context, data)
+        return
+
+    if data.startswith("md:"):  # /model 菜单：切模型 / effort / 权限
+        await _model_callback(query, update, data)
         return
 
     if data.startswith("bh:"):  # 共享浏览器：接管的“我弄好了” / /vnc 的“关闭”
@@ -2003,7 +2052,7 @@ def create_app() -> Application:
 
     async def post_init(application):
         await application.bot.set_my_commands([
-            BotCommand("model", "模型 / effort / 权限：/model list 查看全部"),
+            BotCommand("model", "切换模型 / effort / 权限（按钮菜单）"),
             BotCommand("permissions", "Codex 权限：full / workspace / read-only"),
             BotCommand("abort", "中断当前回合，丢弃还没处理的排队消息"),
             BotCommand("screen", "看当前项目终端的截图"),

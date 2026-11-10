@@ -4,8 +4,10 @@
 Codex 的权限仍由 src/permissions.py 管理（/permissions 与 /model 共用）。
 """
 import json
+import os
 import subprocess
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,16 +15,18 @@ from src.config import PROJECT_ROOT
 
 PREFS_FILE = PROJECT_ROOT / ".model-prefs.json"
 
-# Claude 没有可查询的模型目录，内置清单：(别名, 模型 ID, 显示名)
+# Claude 精选清单（2026-11-10 按网关 /v1/models 核对）：(别名, 模型 ID, 显示名)；/model 菜单按此顺序两两一行
 CLAUDE_MODELS = [
-    ("opus", "claude-opus-5-5[1m]", "Opus 5.5 · 1M 上下文"),
-    ("opus-200k", "claude-opus-5-5", "Opus 5.5 · 200K 上下文"),
-    ("sonnet", "claude-sonnet-5", "Sonnet 5"),
-    ("fable", "claude-fable-5-1", "Fable 5.1"),
-    ("haiku", "claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ("fable", "claude-fable-5-2", "Fable 5.2"),
+    ("fable-5.1", "claude-fable-5-1", "Fable 5.1"),
+    ("opus", "claude-opus-5-5[1m]", "Opus 5.5 · 1M"),
+    ("opus-200k", "claude-opus-5-5", "Opus 5.5"),
+    ("sonnet", "claude-sonnet-5-5", "Sonnet 5.5"),
+    ("haiku", "claude-haiku-5-5", "Haiku 5.5"),
 ]
 CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 CLAUDE_PERMISSIONS = {"full": "bypass（跳过所有审批）", "default": "逐项审批（TG 弹按钮）"}
+PERMISSION_BUTTONS = {"full": "Full", "default": "逐项审批", "workspace": "工作区", "read-only": "只读"}
 CODEX_PERMISSIONS = ("full", "workspace", "read-only")
 ALL_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
@@ -45,6 +49,29 @@ def codex_models(ttl: float = 600) -> list[dict]:
         models = []
     _catalog_cache = (time.time(), models)
     return models
+
+
+def codex_config() -> dict:
+    path = Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+    try:
+        return tomllib.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def default_model(engine: str) -> str | None:
+    """不设 /model 偏好时 CLI 会用的模型：Claude 取 CLAUDE_MODEL（别名解析成 ID），Codex 取 CODEX_MODEL 或 config.toml。"""
+    if engine == "claude":
+        raw = os.getenv("CLAUDE_MODEL", "")
+        return (_claude_model(raw) or raw) if raw else None
+    return os.getenv("CODEX_MODEL") or codex_config().get("model")
+
+
+def default_effort(engine: str, model: str | None, catalog: list[dict]) -> str | None:
+    if engine == "claude":
+        return None   # Claude CLI 的默认 effort 随模型而定，不猜
+    return codex_config().get("model_reasoning_effort") \
+        or next((m["default"] for m in catalog if m["slug"] == model), None)
 
 
 def _load() -> dict:

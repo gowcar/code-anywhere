@@ -482,7 +482,7 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backends.get_backend(cwd), 'codex')
         command.assert_awaited_once_with('tmux', 'send-keys', '-t', '%old', 'Escape')
         register.assert_awaited_once_with('%new', cwd)
-        self.assertIn('引擎：Codex', message.reply_text.call_args.args[0])
+        self.assertIn('（Codex）', message.reply_text.call_args.args[0])
 
     async def test_web_rejects_inactive_backend(self):
         cwd = self.temp.name; backends.set_backend(cwd, 'codex')
