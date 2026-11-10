@@ -143,6 +143,35 @@ class BrowserPoolTests(unittest.IsolatedAsyncioTestCase):
                 await pool.monitor()
         relay.assert_awaited_once_with("stop")
 
+    async def test_stop_slot_still_stops_when_identity_export_hangs(self):
+        """浏览器卡死、导出 cookie 超时：照常停掉，不能让空闲回收永远卡在导出这一步"""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "slot-1.pid").write_text("4242")
+            with patch.object(pool, "IS_MAC", True), patch.object(pool, "BASE", Path(tmp)), \
+                 patch.object(pool, "_version", AsyncMock(return_value={"Browser": "x"})), \
+                 patch.object(pool, "export_identity", AsyncMock(side_effect=asyncio.TimeoutError)), \
+                 patch.object(pool, "_terminate_group", AsyncMock()) as terminate:
+                await pool.stop_slot(1)
+            terminate.assert_awaited_once_with(4242)
+            self.assertFalse((Path(tmp) / "slot-1.pid").exists())
+
+    async def test_terminate_group_escalates_to_kill(self):
+        import signal
+        sent = []
+        with patch.object(pool.os, "killpg", side_effect=lambda pid, sig: sent.append(sig)), \
+             patch.object(pool, "_alive", side_effect=lambda pid: signal.SIGKILL not in sent), \
+             patch.object(pool.asyncio, "sleep", AsyncMock()):
+            await pool._terminate_group(4242, grace=0.3)
+        self.assertEqual(sent, [signal.SIGTERM, signal.SIGKILL])
+
+    async def test_terminate_group_kills_real_process_group(self):
+        import subprocess
+        proc = subprocess.Popen(["/bin/sh", "-c", "trap '' TERM; sleep 30 & wait"], start_new_session=True)
+        await pool._terminate_group(proc.pid, grace=0.5)
+        self.assertIsNotNone(proc.poll())
+
     def test_view_mode_defaults_to_cloudflare_without_config(self):
         with patch.object(pool, "RELAY_HOST", ""), patch.object(pool, "RELAY_PUBLIC_URL", ""), \
              patch.object(pool, "_cloudflared", return_value="/bin/cloudflared"), \
