@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import shlex
+import signal
 import sys
 import time
 from collections import deque
@@ -178,17 +179,51 @@ async def start_slot(slot: int) -> None:
 
 async def stop_slot(slot: int) -> None:
     if await _version(slot):
-        await export_identity(slot)
+        try:
+            await export_identity(slot)
+        except Exception:
+            # 浏览器卡死时 CDP 只剩浏览器级命令有回复（2026-11-09 槽位 1：页面卡在导航半路，取 cookie 永远超时）。
+            # 导出失败也必须停掉，否则每次空闲回收都卡在这里，浏览器永远不退、一直占 CPU
+            log.warning("[browser] 槽位 %s 导出登录身份失败，照常停止", slot, exc_info=True)
     if IS_MAC:
         pid_file = BASE / f"slot-{slot}.pid"
         try:
-            os.kill(int(pid_file.read_text()), 15)
+            await _terminate_group(int(pid_file.read_text()))
         except (OSError, ValueError):
             pass
         pid_file.unlink(missing_ok=True)
     else:
         await _run("systemctl", "--user", "stop", unit(slot))
     log.info("[browser] 槽位 %s 已停止", slot)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0]:   # 本进程拉起的：顺手收尸，免得僵尸进程看起来还活着
+            return False
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+async def _terminate_group(pid: int, grace: float = 5) -> None:
+    """浏览器以独立会话启动（pgid == pid）：整组先 TERM，宽限期内没退出再 KILL，helper 进程一起带走。"""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        for _ in range(int(grace * 10)):
+            if not _alive(pid):
+                return
+            await asyncio.sleep(0.1)
+    log.warning("[browser] 进程组 %s 收到 SIGKILL 后仍未退出", pid)
 
 
 class _Session:
